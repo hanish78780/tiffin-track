@@ -29,71 +29,48 @@ A tiffin service delivers lunch every weekday (Monday through Friday). Customers
 | **Frontend** | React 19, Vite, Tailwind CSS v4, React Router v7, Axios, Lucide React |
 | **Backend** | Node.js, Express.js, MongoDB, Mongoose |
 | **Authentication** | JSON Web Tokens (JWT), bcryptjs |
-| **Testing** | Jest (37/37 unit & isolation tests passing) |
+| **Testing** | Jest (65/65 unit, integration, & isolation tests passing) |
 
 ---
 
-## Prerequisites
+## Builder Challenge Twists (T1, T6, T4)
 
-- [Node.js](https://nodejs.org/) v18+ (tested on v22)
-- [MongoDB](https://www.mongodb.com/) (local instance or MongoDB Atlas URI)
-- npm
+### 1. Level 1 — T1: Delivery Notifications & Outbox Pattern
+- **Overview:** Automatically determines customers due for lunch delivery each morning via clock advancement.
+- **Trigger:** `POST /clock` (and `POST /api/clock`) with optional date payload (`{ "date": "YYYY-MM-DD" }`).
+- **Inspection:** `GET /outbox` (and `GET /api/outbox`), `DELETE /outbox` (for test reset).
+- **Eligibility Rules:**
+  1. Date is Monday through Friday (Saturdays and Sundays strictly excluded).
+  2. Subscription is active and started on or before the target date.
+  3. Subscription is not covered by any active pause period on that date.
+  4. Active assignee determined dynamically (supports historical transfers).
+  5. Multi-tenant isolation enforced if authenticated.
+- **Idempotency:** Driven by a durable MongoDB outbox collection with unique compound constraint on `deliveryEventKey` (`${subscriptionId}_${deliveryDate}`). Repeating the clock tick for the same date will not duplicate notifications.
 
----
+### 2. Level 2 — T6: Subscription Transfer & Split Billing
+- **Overview:** Allows transferring an ongoing subscription to a new customer mid-cycle.
+- **Endpoint:** `POST /api/subscriptions/:id/transfer` with `{ "newCustomerId": "...", "transferDate": "YYYY-MM-DD" }`.
+- **Preserved Invariants:**
+  - Monthly plan price and plan name remain unchanged.
+  - Billing cycle and original subscription start date carry over.
+  - Existing pause history remains valid.
+- **Split Billing Engine:**
+  - `SubscriptionAssignment` records immutable historical ownership intervals.
+  - Billing walks every served weekday in the month, attributing each day to the customer holding the plan on that date.
+  - Response provides detailed `customerBreakdown: [{ customerId, customerName, servedDays, amount }]`.
+  - Pro-rated amounts are reconciled so `sum(amounts) === totalBill` down to the exact cent.
 
-## Getting Started
-
-### 1. Clone Repository
-
-```bash
-git clone https://github.com/hanish78780/tiffin-track.git
-cd tiffin-track
-```
-
-### 2. Backend Setup
-
-```bash
-cd server
-npm install
-cp .env.example .env
-```
-
-Configure `server/.env`:
-```env
-PORT=5000
-MONGO_URI=mongodb://localhost:27017/tiffintrack
-JWT_SECRET=your_jwt_secret_key_here
-```
-
-Start backend:
-```bash
-# Development mode (auto-reload)
-npm run dev
-
-# Production mode
-npm start
-```
-The backend starts at `http://localhost:5000`. Verify health with `curl http://localhost:5000/api/health`.
-
-### 3. Frontend Setup
-
-In a new terminal:
-```bash
-cd client
-npm install
-cp .env.example .env
-```
-
-Configure `client/.env`:
-```env
-VITE_API_URL=http://localhost:5000/api
-```
-
-Start frontend:
-```bash
-npm run dev
-```
-The frontend starts at `http://localhost:5173`.
+### 3. Level 3 — T4: Messy Customer Import
+- **Overview:** Imports messy CSV customer lists into clean customers and subscriptions.
+- **Endpoint:** `POST /api/customers/import` (accepts raw `text/csv` or JSON `{ "csv": "..." }`).
+- **Normalization:**
+  - **Phone:** Strips whitespace, dashes, parentheses, dots; handles `+91`, `91`, and leading `0` prefixes to extract standard 10-digit Indian numbers.
+  - **Date:** Robust parsing for `YYYY-MM-DD`, `DD/MM/YYYY`, `D/M/YYYY`, `DD-MM-YYYY`, `D-M-YYYY`, and `MM/DD/YYYY` in UTC midnight.
+- **Deduplication:**
+  - In-batch deduplication: First valid occurrence is canonical; subsequent duplicate phones within the file are marked `deduped`.
+  - Database deduplication: Compares against existing customers under the authenticated owner (`(ownerId, phone)`).
+- **Validation & Rejection:** Missing required name, phone, planName, non-positive price, or unparseable dates are safely rejected without failing valid rows.
+- **Report Structure:** Returns clear `{ imported, deduped, rejected }` counts and detailed row-level reports.
 
 ---
 
@@ -104,7 +81,7 @@ cd server
 npm test
 ```
 
-**Test Suite Coverage (37 Tests Total):**
+**Test Suite Coverage (65 Tests Total):**
 - **Billing Engine (24 tests):**
   - Weekday counts across standard months, leap years (Feb 2024), and non-leap years (Feb 2023)
   - Full month served (no pauses)
@@ -122,6 +99,31 @@ npm test
   - Owner A access vs Owner B denial for customers, subscriptions, pauses, and billing
   - Phone search scoped strictly to authenticated owner
   - Cross-owner query isolation
+- **T1 Delivery Notifications & Clock (8 tests):**
+  - Active weekday notification generation
+  - Weekend skip (Saturday/Sunday no notifications)
+  - Paused weekday skip
+  - Mixed customer eligibility filter
+  - Clock tick idempotency (no duplicate events on duplicate run)
+  - Future subscription skip (before start date)
+  - Cross-owner notification isolation
+  - Outbox inspection
+- **T6 Subscription Transfer & Split Billing (12 tests):**
+  - Mid-cycle transfer with accurate weekday-split billing
+  - Transfer with active pause period reconciliation
+  - Transfer on first day and last day of month
+  - Cross-month history preservation
+  - Controller validations: 404 missing target, 400 same customer, 409 target has active plan, 400 transfer date before start date, 404 cross-owner transfer
+- **T4 Messy Customer Import (8 tests):**
+  - Phone normalization across formats and prefixes
+  - Mixed date format parsing
+  - Quoted CSV parsing
+  - Clean CSV import
+  - In-batch duplicate phone deduplication
+  - Database duplicate phone deduplication
+  - Row rejection on missing required fields
+  - Full mixed messy dataset processing
+  - Multi-owner isolation during import
 
 ---
 
@@ -132,15 +134,15 @@ npm test
 | `/` | Landing Page | Product overview, value proposition, and CTA | No |
 | `/login` | Login | Owner authentication with JWT retrieval | No |
 | `/register` | Register | New owner account creation with auto-login | No |
-| `/dashboard` | Dashboard | KPI cards (customers, active/paused subs, volume), quick actions, recent customers | Yes |
-| `/customers` | Customers | Full customer table with search, sorting, and pagination | Yes |
+| `/dashboard` | Dashboard | KPI cards (customers, active/paused subs, volume, today's deliveries), quick actions | Yes |
+| `/customers` | Customers | Full customer table with search, sorting, pagination, Phone Lookup, and CSV Import modal (T4) | Yes |
 | `/customers/new` | New Customer | Create customer form with prompt to create subscription | Yes |
 | `/customers/:id` | Customer Details | Contact info, linked subscription status, actions | Yes |
 | `/customers/:id/edit` | Edit Customer | Update customer contact & delivery address | Yes |
 | `/subscriptions` | Subscriptions | Table with Active/Paused filter tabs and pause/resume buttons | Yes |
 | `/subscriptions/new` | New Subscription | Assign customer to lunch plan with price & start date | Yes |
-| `/subscriptions/:id` | Subscription Details | Plan status, pause history log, pause/resume modals | Yes |
-| `/billing` | Monthly Billing | Customer & month selector, pro-rated bill card, calculation breakdown | Yes |
+| `/subscriptions/:id` | Subscription Details | Plan status, pause history, ownership transfer history (T6), pause/resume/transfer modals | Yes |
+| `/billing` | Monthly Billing | Customer & month selector, pro-rated bill card, calculation breakdown, customer split breakdown (T6) | Yes |
 
 ---
 
@@ -157,16 +159,23 @@ npm test
 - `GET /api/customers/:id` — Get customer by ID
 - `PUT /api/customers/:id` — Update customer by ID
 - `GET /api/customers/phone/:phone` — Lookup customer by phone
+- `POST /api/customers/import` — Import messy CSV customer list with { imported, deduped, rejected } report (T4)
 
 ### Subscriptions (Owner-Scoped)
 - `POST /api/subscriptions` — Create subscription (`customerId`, `planName`, `monthlyPrice`, `startDate`)
 - `GET /api/subscriptions` — List subscriptions (`status`, `page`, `limit`, `sort`, `order`)
-- `GET /api/subscriptions/:id` — Get subscription details
+- `GET /api/subscriptions/:id` — Get subscription details with pause and assignment history
 - `POST /api/subscriptions/:id/pause` — Pause subscription (`startDate`, `reason`)
 - `POST /api/subscriptions/:id/resume` — Resume subscription (`resumeDate`)
+- `POST /api/subscriptions/:id/transfer` — Transfer subscription to new customer mid-cycle (T6)
 
 ### Billing (Owner-Scoped)
-- `GET /api/billing/:customerId?month=YYYY-MM` — Pro-rated bill calculation
+- `GET /api/billing/:customerId?month=YYYY-MM` — Pro-rated bill calculation (supports split breakdown for transferred plans)
+
+### Clock & Outbox (T1 Grader Integration)
+- `POST /clock` (and `POST /api/clock`) — Advance clock and trigger morning delivery notifications
+- `GET /outbox` (and `GET /api/outbox`) — Inspect notification events in the durable outbox
+- `DELETE /outbox` (and `DELETE /api/outbox`) — Clear outbox events (test isolation)
 
 ---
 
@@ -199,8 +208,9 @@ tiffin-track/
 │   │   ├── components/
 │   │   │   ├── common/         # Button, Input, Select, Modal, Card, KpiCard, StatusBadge, Pagination, Skeletons
 │   │   │   ├── layout/         # Sidebar, Header, AppLayout
-│   │   │   ├── subscriptions/  # PauseModal, ResumeModal
-│   │   │   └── billing/        # BillingCard, BillingBreakdown
+│   │   │   ├── subscriptions/  # PauseModal, ResumeModal, TransferModal (T6)
+│   │   │   ├── customers/      # CustomerImportModal (T4)
+│   │   │   └── billing/        # BillingCard (with T6 split breakdown), BillingBreakdown
 │   │   ├── pages/              # Landing, Login, Register, Dashboard, Customers, Subscriptions, Billing
 │   │   ├── context/            # AuthContext, ToastContext
 │   │   ├── services/           # Axios API instance & domain services
@@ -214,12 +224,12 @@ tiffin-track/
 │
 ├── server/
 │   ├── config/                 # MongoDB database connector
-│   ├── controllers/            # auth, customer, subscription, billing controllers
-│   ├── middleware/             # authMiddleware (JWT protect), errorHandler
-│   ├── models/                 # User, Customer, Subscription, PausePeriod
-│   ├── routes/                 # authRoutes, customerRoutes, subscriptionRoutes, billingRoutes
-│   ├── tests/                  # billing.test.js (24 tests), authorization.test.js (13 tests)
-│   ├── utils/                  # billing.js (UTC-safe pro-rated billing engine)
+│   ├── controllers/            # auth, customer, customerImport, subscription, billing, clock, outbox
+│   ├── middleware/             # authMiddleware (JWT protect & optionalProtect), errorHandler
+│   ├── models/                 # User, Customer, Subscription, PausePeriod, SubscriptionAssignment, NotificationOutbox
+│   ├── routes/                 # authRoutes, customerRoutes, subscriptionRoutes, billingRoutes, clockRoutes, outboxRoutes
+│   ├── tests/                  # billing.test.js, authorization.test.js, clock.test.js, transfer.test.js, import.test.js
+│   ├── utils/                  # billing.js (pro-rated billing engine), importUtils.js (CSV, phone, date parser)
 │   ├── .env.example
 │   ├── package.json
 │   └── server.js

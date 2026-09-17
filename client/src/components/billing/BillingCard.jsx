@@ -141,6 +141,58 @@ const BillingCard = ({ billData, customerId, onOpenCreateSub }) => {
           You are charged only for weekdays when lunch was actually served.
         </p>
 
+        {/* Customer Service Breakdown for Transferred Subscriptions (T6) */}
+        {billing.customerBreakdown && billing.customerBreakdown.length > 1 && (
+          <div className="p-4 rounded-xl border border-blue-200/80 bg-blue-50/40 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-blue-900">
+                  Customer Service Breakdown (Transferred Plan)
+                </h4>
+                <p className="text-[11px] text-blue-700 mt-0.5">
+                  The plan and cycle carried over across {billing.customerBreakdown.length} customers. Billing splits by days served.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {billing.customerBreakdown.map((item, idx) => {
+                const isCurrent = String(item.customerId) === String(customer.id || customer._id);
+                return (
+                  <div
+                    key={idx}
+                    className={`p-3 rounded-lg border flex items-center justify-between gap-3 text-xs ${
+                      isCurrent
+                        ? "bg-white border-blue-300 shadow-xs font-semibold"
+                        : "bg-white/70 border-slate-200 text-slate-700"
+                    }`}
+                  >
+                    <div>
+                      <span className="text-slate-900 font-bold">
+                        {item.customerName}
+                      </span>
+                      {isCurrent && (
+                        <span className="ml-1.5 px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[10px] font-bold">
+                          Selected Customer
+                        </span>
+                      )}
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {item.servedDays} served days × ₹{billing.dailyRate.toFixed(2)}/day
+                      </p>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-sm font-bold text-slate-950 font-mono">
+                        ₹{item.amount.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Pause History for this month if any */}
         {pausePeriods && pausePeriods.length > 0 && (
           <div className="pt-4 border-t border-slate-100">

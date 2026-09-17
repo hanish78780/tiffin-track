@@ -100,6 +100,7 @@ const countPausedWeekdays = (year, month, pausePeriods) => {
 
 /**
  * Calculate the pro-rated bill for a subscription in a given month.
+ * Supports split billing across transferred customers (T6).
  *
  * Formula:
  *   totalWeekdays  = weekdays in the calendar month
@@ -115,15 +116,23 @@ const countPausedWeekdays = (year, month, pausePeriods) => {
  * @param {number} params.year         - Full year
  * @param {number} params.month        - 1-indexed month
  * @param {Array}  params.pausePeriods - Array of pause period objects
- * @returns {Object} Billing breakdown
+ * @param {Array}  params.assignments  - Array of assignment objects (T6)
+ * @param {Object} params.defaultCustomer - Optional default customer object
+ * @returns {Object} Billing breakdown including customerBreakdown
  */
-const calculateBill = ({ monthlyPrice, year, month, pausePeriods = [] }) => {
+const calculateBill = ({
+  monthlyPrice,
+  year,
+  month,
+  pausePeriods = [],
+  assignments = [],
+  defaultCustomer = null
+}) => {
   const totalWeekdays = countWeekdaysInMonth(year, month);
   const pausedDays = countPausedWeekdays(year, month, pausePeriods);
   const servedDays = totalWeekdays - pausedDays;
 
-  // Avoid division by zero (e.g. a month with 0 weekdays — shouldn't happen
-  // in practice, but defensive coding)
+  // Avoid division by zero
   const dailyRate = totalWeekdays > 0
     ? parseFloat((monthlyPrice / totalWeekdays).toFixed(2))
     : 0;
@@ -133,13 +142,128 @@ const calculateBill = ({ monthlyPrice, year, month, pausePeriods = [] }) => {
     ? parseFloat(((monthlyPrice / totalWeekdays) * servedDays).toFixed(2))
     : 0;
 
+  const customerBreakdown = [];
+
+  // Month boundaries as UTC timestamps
+  const monthStartMs = Date.UTC(year, month - 1, 1);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const monthEndMs = Date.UTC(year, month - 1, daysInMonth);
+
+  // Collect paused days as Set of YYYY-MM-DD
+  const pausedDaysSet = new Set();
+  for (const pause of pausePeriods) {
+    const pauseStartMs = toUTCMidnight(pause.startDate);
+    const pauseEndMs = pause.endDate ? toUTCMidnight(pause.endDate) : monthEndMs;
+
+    const effectiveStartMs = Math.max(pauseStartMs, monthStartMs);
+    const effectiveEndMs = Math.min(pauseEndMs, monthEndMs);
+
+    if (effectiveStartMs <= monthEndMs && effectiveEndMs >= monthStartMs) {
+      let currentMs = effectiveStartMs;
+      while (currentMs <= effectiveEndMs) {
+        const d = new Date(currentMs);
+        if (d.getUTCDay() >= 1 && d.getUTCDay() <= 5) {
+          pausedDaysSet.add(d.toISOString().slice(0, 10));
+        }
+        currentMs += ONE_DAY_MS;
+      }
+    }
+  }
+
+  // If assignments are provided, assign served days to respective customers
+  if (assignments && assignments.length > 0) {
+    const customerDayCount = new Map();
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dayUtcMs = Date.UTC(year, month - 1, day);
+      const d = new Date(dayUtcMs);
+      const dow = d.getUTCDay();
+      if (dow < 1 || dow > 5) continue; // skip weekend
+
+      const dateStr = d.toISOString().slice(0, 10);
+      if (pausedDaysSet.has(dateStr)) continue; // skip paused day
+
+      const matchingAssignment = assignments.find((a) => {
+        const aStart = toUTCMidnight(a.startDate);
+        const aEnd = a.endDate ? toUTCMidnight(a.endDate) : Infinity;
+        return dayUtcMs >= aStart && dayUtcMs <= aEnd;
+      });
+
+      if (matchingAssignment) {
+        const custId = String(matchingAssignment.customerId?._id || matchingAssignment.customerId);
+        const custName =
+          matchingAssignment.customerName ||
+          matchingAssignment.customerId?.name ||
+          "Customer";
+        if (!customerDayCount.has(custId)) {
+          customerDayCount.set(custId, {
+            customerId: custId,
+            customerName: custName,
+            servedDays: 0
+          });
+        }
+        customerDayCount.get(custId).servedDays++;
+      } else if (defaultCustomer) {
+        const custId = String(defaultCustomer.id || defaultCustomer._id);
+        const custName = defaultCustomer.name || "Customer";
+        if (!customerDayCount.has(custId)) {
+          customerDayCount.set(custId, {
+            customerId: custId,
+            customerName: custName,
+            servedDays: 0
+          });
+        }
+        customerDayCount.get(custId).servedDays++;
+      }
+    }
+
+    const unroundedDailyRate = totalWeekdays > 0 ? monthlyPrice / totalWeekdays : 0;
+    let sumLineAmounts = 0;
+
+    for (const item of customerDayCount.values()) {
+      const amount = parseFloat((unroundedDailyRate * item.servedDays).toFixed(2));
+      customerBreakdown.push({
+        customerId: item.customerId,
+        customerName: item.customerName,
+        servedDays: item.servedDays,
+        amount
+      });
+      sumLineAmounts += amount;
+    }
+
+    // Reconcile any 1-cent rounding difference so sum(amounts) === totalBill
+    if (customerBreakdown.length > 0) {
+      const roundedSum = parseFloat(sumLineAmounts.toFixed(2));
+      const delta = parseFloat((totalBill - roundedSum).toFixed(2));
+      if (Math.abs(delta) > 0) {
+        let maxIndex = 0;
+        for (let i = 1; i < customerBreakdown.length; i++) {
+          if (customerBreakdown[i].servedDays > customerBreakdown[maxIndex].servedDays) {
+            maxIndex = i;
+          }
+        }
+        customerBreakdown[maxIndex].amount = parseFloat(
+          (customerBreakdown[maxIndex].amount + delta).toFixed(2)
+        );
+      }
+    }
+  } else if (defaultCustomer) {
+    customerBreakdown.push({
+      customerId: String(defaultCustomer.id || defaultCustomer._id),
+      customerName: defaultCustomer.name || "Customer",
+      servedDays,
+      amount: totalBill
+    });
+  }
+
   return {
     monthlyPrice,
     totalWeekdays,
     pausedDays,
     servedDays,
     dailyRate,
-    totalBill
+    totalBill,
+    customerBreakdown
   };
 };
 

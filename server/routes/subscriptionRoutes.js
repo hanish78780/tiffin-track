@@ -6,7 +6,8 @@ const {
   getSubscriptions,
   getSubscriptionById,
   pauseSubscription,
-  resumeSubscription
+  resumeSubscription,
+  transferSubscription
 } = require("../controllers/subscriptionController");
 
 // All subscription routes require authentication
@@ -15,5 +16,6 @@ router.get("/", protect, getSubscriptions);
 router.get("/:id", protect, getSubscriptionById);
 router.post("/:id/pause", protect, pauseSubscription);
 router.post("/:id/resume", protect, resumeSubscription);
+router.post("/:id/transfer", protect, transferSubscription);
 
 module.exports = router;

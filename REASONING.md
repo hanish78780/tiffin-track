@@ -181,8 +181,51 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 
 ### 3. Workflow Optimizations
 - **Guided Customer Onboarding**: Creating a customer immediately prompts the owner to configure a subscription plan for them, eliminating lost customer navigation.
-- **Modal-Based Pause / Resume**: Pausing and resuming subscriptions occur directly via lightweight modals with prefilled dates and notes, refreshing the view in-place without page transitions.
 - **Transparent Pro-Rated Billing**: The `/billing` view displays both the final bill and an interactive step-by-step pipeline (`Plan Price ÷ Total Weekdays = Daily Rate × Served Days = Final Bill`), making the underlying pro-ration logic immediately verifiable.
+
+---
+
+## Builder Challenge Twists Architecture & Rationale
+
+### 1. Level 1 — T1: Delivery Notifications & Outbox Pattern
+
+#### Why Server-Side and Idempotent?
+- **Automated Lifecycle vs Frontend Dependency:** Daily delivery operations in food delivery cannot depend on the tiffin owner keeping a browser tab open. The eligibility check and notification dispatch must be fully deterministic, headless, and server-side.
+- **Idempotency via Unique Event Key:** Clock advancements can trigger multiple times (e.g., retried clock ticks, automated scheduler replays, distributed workers). If `/clock` is called repeatedly for the same business date (e.g. `2026-09-14`), generating duplicate customer messages would result in confusion and real-world delivery errors.
+- **Durable Outbox Pattern:** Notifications are written to `NotificationOutbox` using a composite unique constraint `deliveryEventKey: ${subscriptionId}_${deliveryDate}`. A duplicate run cleanly catches MongoDB error code 11000 and skips insertion without aborting the batch, guaranteeing exactly-once delivery notification semantics.
+- **Strict Weekday and Pause Boundaries:** Deliveries are Monday–Friday only (`dayOfWeek >= 1 && dayOfWeek <= 5`). Paused subscriptions and subscriptions starting in the future are deterministically filtered out before outbox recording.
+
+### 2. Level 2 — T6: Subscription Transfer & Split Billing
+
+#### Why Simply Mutating `subscription.customerId` Is Catastrophic
+- In a pro-rated subscription system, a customer is billed based on days *actually served*.
+- If a subscription transfer simply overwrote `subscription.customerId = newCustomerId`, the system would lose all historical record of who owned the plan earlier in the month.
+- At month-end, the new customer would be charged for the previous customer's lunch meals, and the previous customer would receive an artificial ₹0 bill.
+
+#### The `SubscriptionAssignment` Solution
+- Rather than destroying historical context or creating duplicate subscriptions with overlapping cycle dates, we introduced `SubscriptionAssignment`.
+- Each assignment tracks `(subscriptionId, customerId, startDate, endDate)`.
+- When transferred on `transferDate` (e.g. `2026-09-15`):
+  - The previous assignment is finalized with `endDate = 2026-09-14` (inclusive).
+  - A new assignment is opened starting on `2026-09-15` with `endDate = null`.
+- **Preservation of Plan and Cycle:**
+  - The plan price (e.g., ₹3,000) and calendar month cycle (e.g., Sep 1 → Sep 30) remain intact.
+  - The daily rate is computed once for the entire plan: `monthlyPrice ÷ totalWeekdays` (e.g. ₹3,000 ÷ 22 = ₹136.3636...).
+  - Billing walks every weekday in the month: if not paused, the day is attributed to whichever customer held the assignment on that date.
+  - Line-item amounts are calculated using the unrounded daily rate and reconciled against the total bill to prevent rounding drift (e.g. `₹1,363.64 + ₹1,636.36 = ₹3,000.00`).
+  - Customer billing lookups (`GET /api/billing/:customerId?month=YYYY-MM`) correctly charge each customer only for their respective served days.
+
+### 3. Level 3 — T4: Messy Customer Import
+
+#### Normalization Before Deduplication
+- Real-world CSV customer data is riddled with formatting inconsistencies: spaces (`98765 43210`), dashes (`98765-43210`), international codes (`+91 9876543210`), leading zeros (`09876543210`), and mixed date formats (`YYYY-MM-DD`, `DD/MM/YYYY`, `9-1-2026`).
+- Deduplicating raw text without prior normalization leads to severe data contamination: `98765 43210` and `98765-43210` would be treated as two different customers, causing duplicate database records and double-billing.
+- By running phone and date normalization *first*, all numbers are transformed into canonical 10-digit strings and dates into UTC midnight timestamps before any uniqueness checks occur.
+
+#### Independent Row Processing & Atomic Per-Row Creation
+- Rejecting an entire CSV file because of one malformed row (e.g., a blank name on row 12) is terrible user experience for a tiffin owner uploading 100+ customers.
+- Conversely, allowing a row to create a Customer without a Subscription leads to orphaned records.
+- **Strategy:** Each row is processed independently. A valid row creates both the Customer, Subscription, and initial Assignment. If a phone is already present in the batch or in the owner's database, it is safely recorded as `deduped`. If essential fields are invalid, it is counted as `rejected` with an explicit reason. The final response returns `{ imported, deduped, rejected }` along with granular row-level reports.
 
 ## Trade-Offs
 

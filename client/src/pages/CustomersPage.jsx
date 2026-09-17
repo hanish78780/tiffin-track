@@ -7,7 +7,8 @@ import {
   Phone,
   MapPin,
   ExternalLink,
-  Edit2
+  Edit2,
+  UploadCloud
 } from "lucide-react";
 import { customerService } from "../services/customerService";
 import { subscriptionService } from "../services/subscriptionService";
@@ -20,6 +21,7 @@ import StatusBadge from "../components/common/StatusBadge";
 import EmptyState from "../components/common/EmptyState";
 import ErrorState from "../components/common/ErrorState";
 import { TableSkeleton } from "../components/common/LoadingSkeleton";
+import CustomerImportModal from "../components/customers/CustomerImportModal";
 
 const CustomersPage = () => {
   const [customers, setCustomers] = useState([]);
@@ -31,6 +33,8 @@ const CustomersPage = () => {
   const [order, setOrder] = useState("desc");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const [importModalOpen, setImportModalOpen] = useState(false);
 
   // Dedicated phone lookup state (GET /api/customers/phone/:phone)
   const [phoneModalOpen, setPhoneModalOpen] = useState(false);
@@ -132,6 +136,14 @@ const CustomersPage = () => {
           </p>
         </div>
         <div className="flex items-center gap-2.5">
+          <Button
+            variant="outline"
+            size="md"
+            icon={UploadCloud}
+            onClick={() => setImportModalOpen(true)}
+          >
+            Import CSV
+          </Button>
           <Button
             variant="outline"
             size="md"
@@ -403,6 +415,13 @@ const CustomersPage = () => {
           )}
         </form>
       </Modal>
+
+      {/* T4: Customer Import Modal */}
+      <CustomerImportModal
+        isOpen={importModalOpen}
+        onClose={() => setImportModalOpen(false)}
+        onSuccess={() => fetchCustomers(1)}
+      />
     </div>
   );
 };

@@ -8,10 +8,12 @@ const {
   updateCustomer,
   getCustomerByPhone
 } = require("../controllers/customerController");
+const { importCustomers } = require("../controllers/customerImportController");
 
 // All customer routes require authentication
-// Phone lookup must be defined before /:id to avoid matching "phone" as an id
+// Specific routes defined before /:id to prevent parameter matching collisions
 router.get("/phone/:phone", protect, getCustomerByPhone);
+router.post("/import", protect, importCustomers);
 
 router.post("/", protect, createCustomer);
 router.get("/", protect, getCustomers);

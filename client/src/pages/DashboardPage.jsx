@@ -8,11 +8,13 @@ import {
   Plus,
   ArrowRight,
   ExternalLink,
-  Phone
+  Phone,
+  Truck
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { customerService } from "../services/customerService";
 import { subscriptionService } from "../services/subscriptionService";
+import { billingService } from "../services/billingService";
 import KpiCard from "../components/common/KpiCard";
 import Button from "../components/common/Button";
 import StatusBadge from "../components/common/StatusBadge";
@@ -60,9 +62,12 @@ const DashboardPage = () => {
         limit: 100
       });
 
+      const activeSubsList = activeSubData.subscriptions || [];
+      const pausedSubsList = pausedSubData.subscriptions || [];
+
       const totalCustomersCount = custData.pagination?.total || 0;
-      const activeCount = activeSubData.pagination?.total || 0;
-      const pausedCount = pausedSubData.pagination?.total || 0;
+      const activeCount = activeSubData.pagination?.total || activeSubsList.length;
+      const pausedCount = pausedSubData.pagination?.total || pausedSubsList.length;
 
       // Calculate real current-month pro-rated billing from the billing engine
       const currentMonth = new Date().toISOString().slice(0, 7);
@@ -131,6 +136,14 @@ const DashboardPage = () => {
           <p className="mt-1.5 text-xs sm:text-sm text-emerald-100/90 font-medium">
             Here's what's happening with your tiffin service today.
           </p>
+          <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-xs border border-white/20 text-xs text-emerald-100 font-medium">
+            <Truck className="w-3.5 h-3.5 text-emerald-300" />
+            <span>
+              {[1, 2, 3, 4, 5].includes(new Date().getUTCDay())
+                ? `Today's Deliveries: ${stats.todayDeliveries || 0} active weekday meals`
+                : "Weekend: No deliveries scheduled today"}
+            </span>
+          </div>
         </div>
 
         {/* Quick actions in banner */}

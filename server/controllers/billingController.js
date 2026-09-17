@@ -4,11 +4,14 @@ const Subscription = require("../models/Subscription");
 const PausePeriod = require("../models/PausePeriod");
 const { calculateBill } = require("../utils/billing");
 
+const SubscriptionAssignment = require("../models/SubscriptionAssignment");
+
 /**
  * GET /api/billing/:customerId?month=YYYY-MM
  * Calculate the pro-rated monthly bill for a customer.
  * All ownership checks enforce that the customer, subscription,
  * and pause periods belong to the authenticated owner.
+ * Supports split billing for transferred subscriptions (T6).
  */
 const getBill = async (req, res, next) => {
   try {
@@ -49,10 +52,32 @@ const getBill = async (req, res, next) => {
     }
 
     // Find the customer's subscription (owner-scoped)
-    const subscription = await Subscription.findOne({
+    // First check if customer is current subscription holder
+    let subscription = await Subscription.findOne({
       customerId: customer._id,
       ownerId: req.user.id
     });
+
+    // If not current customer, check if customer was historically assigned during this month (T6)
+    const monthStart = new Date(Date.UTC(year, monthNum - 1, 1));
+    const daysInMonth = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+    const monthEnd = new Date(Date.UTC(year, monthNum - 1, daysInMonth, 23, 59, 59, 999));
+
+    if (!subscription) {
+      const historicalAssignment = await SubscriptionAssignment.findOne({
+        customerId: customer._id,
+        ownerId: req.user.id,
+        startDate: { $lte: monthEnd },
+        $or: [{ endDate: null }, { endDate: { $gte: monthStart } }]
+      });
+
+      if (historicalAssignment) {
+        subscription = await Subscription.findOne({
+          _id: historicalAssignment.subscriptionId,
+          ownerId: req.user.id
+        });
+      }
+    }
 
     if (!subscription) {
       return res.status(404).json({
@@ -67,13 +92,29 @@ const getBill = async (req, res, next) => {
       ownerId: req.user.id
     });
 
+    // Retrieve all assignments for this subscription to calculate split billing (T6)
+    const assignments = await SubscriptionAssignment.find({
+      subscriptionId: subscription._id,
+      ownerId: req.user.id
+    }).populate("customerId", "name phone");
+
     // Calculate the bill
     const billing = calculateBill({
       monthlyPrice: subscription.monthlyPrice,
       year,
       month: monthNum,
-      pausePeriods
+      pausePeriods,
+      assignments,
+      defaultCustomer: { id: customer._id, name: customer.name }
     });
+
+    // Determine if this is a split subscription and find this customer's portion
+    const myLine = billing.customerBreakdown?.find(
+      (c) => String(c.customerId) === String(customer._id)
+    );
+
+    const customerServedDays = myLine !== undefined ? myLine.servedDays : billing.servedDays;
+    const customerBill = myLine !== undefined ? myLine.amount : billing.totalBill;
 
     res.json({
       success: true,
@@ -89,7 +130,15 @@ const getBill = async (req, res, next) => {
       },
       billing: {
         month,
-        ...billing
+        monthlyPrice: billing.monthlyPrice,
+        totalWeekdays: billing.totalWeekdays,
+        pausedDays: billing.pausedDays,
+        servedDays: customerServedDays,
+        dailyRate: billing.dailyRate,
+        totalBill: customerBill,
+        planTotalBill: billing.totalBill,
+        planTotalServedDays: billing.servedDays,
+        customerBreakdown: billing.customerBreakdown || []
       },
       pausePeriods: pausePeriods.map((p) => ({
         startDate: p.startDate,

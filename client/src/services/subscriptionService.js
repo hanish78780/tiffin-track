@@ -24,6 +24,11 @@ export const subscriptionService = {
   async resumeSubscription(id, { resumeDate }) {
     const response = await api.post(`/subscriptions/${id}/resume`, { resumeDate });
     return response.data;
+  },
+
+  async transferSubscription(id, { newCustomerId, transferDate }) {
+    const response = await api.post(`/subscriptions/${id}/transfer`, { newCustomerId, transferDate });
+    return response.data;
   }
 };
 

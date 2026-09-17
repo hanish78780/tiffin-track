@@ -24,6 +24,11 @@ export const customerService = {
   async updateCustomer(id, customerData) {
     const response = await api.put(`/customers/${id}`, customerData);
     return response.data;
+  },
+
+  async importCustomers(csvText) {
+    const response = await api.post("/customers/import", { csv: csvText });
+    return response.data;
   }
 };
 

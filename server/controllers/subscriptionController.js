@@ -3,6 +3,8 @@ const Customer = require("../models/Customer");
 const Subscription = require("../models/Subscription");
 const PausePeriod = require("../models/PausePeriod");
 
+const SubscriptionAssignment = require("../models/SubscriptionAssignment");
+
 /**
  * POST /api/subscriptions
  * Create a new subscription for a customer owned by the authenticated user.
@@ -67,6 +69,15 @@ const createSubscription = async (req, res, next) => {
       monthlyPrice,
       startDate,
       status: "active"
+    });
+
+    // Create initial subscription assignment for historical tracking (T6)
+    await SubscriptionAssignment.create({
+      ownerId: req.user.id,
+      subscriptionId: subscription._id,
+      customerId: customer._id,
+      startDate: subscription.startDate,
+      endDate: null
     });
 
     res.status(201).json({
@@ -164,15 +175,24 @@ const getSubscriptionById = async (req, res, next) => {
       });
     }
 
-    const pausePeriods = await PausePeriod.find({
-      subscriptionId: subscription._id,
-      ownerId: req.user.id
-    }).sort({ createdAt: -1 });
+    const [pausePeriods, assignments] = await Promise.all([
+      PausePeriod.find({
+        subscriptionId: subscription._id,
+        ownerId: req.user.id
+      }).sort({ createdAt: -1 }),
+      SubscriptionAssignment.find({
+        subscriptionId: subscription._id,
+        ownerId: req.user.id
+      })
+        .populate("customerId", "name phone address")
+        .sort({ startDate: 1 })
+    ]);
 
     res.json({
       success: true,
       subscription,
-      pausePeriods
+      pausePeriods,
+      assignments
     });
   } catch (error) {
     next(error);
@@ -334,10 +354,179 @@ const resumeSubscription = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/subscriptions/:id/transfer
+ * Transfer a subscription to a new customer mid-cycle (T6).
+ * Plan, cycle, price, and pause history remain unchanged.
+ * Billing splits by who was served.
+ */
+const transferSubscription = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format"
+      });
+    }
+
+    const { newCustomerId, transferDate } = req.body;
+
+    if (!newCustomerId || !transferDate) {
+      return res.status(400).json({
+        success: false,
+        message: "newCustomerId and transferDate are required"
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(newCustomerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid customer ID format"
+      });
+    }
+
+    // Find subscription owned by authenticated user
+    const subscription = await Subscription.findOne({
+      _id: req.params.id,
+      ownerId: req.user.id
+    });
+
+    if (!subscription) {
+      return res.status(404).json({
+        success: false,
+        message: "Subscription not found"
+      });
+    }
+
+    if (subscription.status === "paused") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot transfer a subscription while it is paused. Please resume first."
+      });
+    }
+
+    // Check if new customer exists and belongs to authenticated owner
+    const newCustomer = await Customer.findOne({
+      _id: newCustomerId,
+      ownerId: req.user.id
+    });
+
+    if (!newCustomer) {
+      return res.status(404).json({
+        success: false,
+        message: "Target customer not found"
+      });
+    }
+
+    // Cannot transfer to same customer
+    if (String(subscription.customerId) === String(newCustomerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot transfer subscription to the same customer"
+      });
+    }
+
+    // Target customer cannot already have an active subscription
+    const existingActiveForTarget = await Subscription.findOne({
+      customerId: newCustomerId,
+      ownerId: req.user.id,
+      status: "active",
+      _id: { $ne: subscription._id }
+    });
+
+    if (existingActiveForTarget) {
+      return res.status(409).json({
+        success: false,
+        message: "Target customer already has an active subscription"
+      });
+    }
+
+    // Validate transfer date format
+    const transferDateMatch = String(transferDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!transferDateMatch) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid transferDate format. Expected YYYY-MM-DD"
+      });
+    }
+
+    const tYear = parseInt(transferDateMatch[1], 10);
+    const tMonth = parseInt(transferDateMatch[2], 10);
+    const tDay = parseInt(transferDateMatch[3], 10);
+    const transferUtcMs = Date.UTC(tYear, tMonth - 1, tDay);
+
+    const subStartDate = new Date(subscription.startDate);
+    const subStartUtcMs = Date.UTC(
+      subStartDate.getUTCFullYear(),
+      subStartDate.getUTCMonth(),
+      subStartDate.getUTCDate()
+    );
+
+    if (transferUtcMs < subStartUtcMs) {
+      return res.status(400).json({
+        success: false,
+        message: "Transfer date cannot be before subscription start date"
+      });
+    }
+
+    // Find currently active assignment
+    let currentAssignment = await SubscriptionAssignment.findOne({
+      subscriptionId: subscription._id,
+      ownerId: req.user.id,
+      endDate: null
+    });
+
+    // If no assignments exist yet (legacy), create retroactive initial assignment
+    if (!currentAssignment) {
+      currentAssignment = await SubscriptionAssignment.create({
+        ownerId: req.user.id,
+        subscriptionId: subscription._id,
+        customerId: subscription.customerId,
+        startDate: subscription.startDate,
+        endDate: null
+      });
+    }
+
+    // Close previous assignment on the day before transferDate (inclusive)
+    const dayBeforeTransferUtcMs = transferUtcMs - 86400000;
+    currentAssignment.endDate = new Date(dayBeforeTransferUtcMs);
+    await currentAssignment.save();
+
+    // Create new assignment starting on transferDate
+    const newAssignment = await SubscriptionAssignment.create({
+      ownerId: req.user.id,
+      subscriptionId: subscription._id,
+      customerId: newCustomerId,
+      startDate: new Date(transferUtcMs),
+      endDate: null
+    });
+
+    // Update current customer on subscription
+    const previousCustomerId = subscription.customerId;
+    subscription.customerId = newCustomerId;
+    await subscription.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Subscription transferred successfully",
+      subscription,
+      transfer: {
+        previousCustomerId,
+        newCustomerId,
+        transferDate: `${tYear}-${String(tMonth).padStart(2, "0")}-${String(tDay).padStart(2, "0")}`,
+        newAssignmentId: newAssignment._id
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createSubscription,
   getSubscriptions,
   getSubscriptionById,
   pauseSubscription,
-  resumeSubscription
+  resumeSubscription,
+  transferSubscription
 };

@@ -10,7 +10,8 @@ import {
   PlayCircle,
   Receipt,
   History,
-  Clock
+  Clock,
+  ArrowRightLeft
 } from "lucide-react";
 import { subscriptionService } from "../services/subscriptionService";
 import { billingService } from "../services/billingService";
@@ -21,17 +22,20 @@ import ErrorState from "../components/common/ErrorState";
 import { CardSkeleton } from "../components/common/LoadingSkeleton";
 import PauseModal from "../components/subscriptions/PauseModal";
 import ResumeModal from "../components/subscriptions/ResumeModal";
+import TransferModal from "../components/subscriptions/TransferModal";
 
 const SubscriptionDetailPage = () => {
   const { id } = useParams();
 
   const [subscription, setSubscription] = useState(null);
   const [pausePeriods, setPausePeriods] = useState([]);
+  const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const [pauseModalOpen, setPauseModalOpen] = useState(false);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   const fetchSubscriptionDetails = useCallback(async () => {
     setLoading(true);
@@ -41,6 +45,10 @@ const SubscriptionDetailPage = () => {
       const data = await subscriptionService.getSubscriptionById(id);
       const sub = data.subscription;
       setSubscription(sub);
+
+      if (data.assignments) {
+        setAssignments(data.assignments);
+      }
 
       // Fetch billing for the current month or check if pausePeriods returned
       if (data.pausePeriods) {
@@ -200,6 +208,17 @@ const SubscriptionDetailPage = () => {
             </span>
 
             <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="md"
+                icon={ArrowRightLeft}
+                onClick={() => setTransferModalOpen(true)}
+                disabled={subscription.status === "paused"}
+                title={subscription.status === "paused" ? "Resume before transferring" : "Transfer plan to another customer"}
+              >
+                Transfer Plan
+              </Button>
+
               {subscription.status === "active" ? (
                 <Button
                   variant="amber"
@@ -222,6 +241,74 @@ const SubscriptionDetailPage = () => {
             </div>
           </div>
         </div>
+      </Card>
+
+      {/* Ownership & Transfer History (T6) */}
+      <Card
+        title="Ownership & Transfer History"
+        subtitle="Track who owned and received deliveries across this subscription's lifecycle"
+      >
+        {assignments.length === 0 ? (
+          <div className="py-6 text-center text-xs text-slate-500">
+            Currently assigned to {cust.name || "registered customer"}.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {assignments.map((assign, idx) => (
+              <div
+                key={idx}
+                className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                  !assign.endDate
+                    ? "border-emerald-200 bg-emerald-50/40 text-emerald-950"
+                    : "border-slate-200 bg-slate-50/50 text-slate-800"
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      !assign.endDate ? "bg-emerald-500" : "bg-slate-400"
+                    }`}
+                  />
+                  <div>
+                    <span className="font-bold text-slate-900">
+                      {assign.customerId?.name || "Customer"}
+                    </span>
+                    {assign.customerId?.phone && (
+                      <span className="text-slate-500 ml-1.5 font-normal">
+                        ({assign.customerId.phone})
+                      </span>
+                    )}
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      <span>
+                        From: {new Date(assign.startDate).toLocaleDateString("en-IN", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric"
+                        })}
+                      </span>
+                      <span className="mx-1.5">•</span>
+                      <span>
+                        To: {assign.endDate
+                          ? new Date(assign.endDate).toLocaleDateString("en-IN", {
+                              month: "short",
+                              day: "numeric",
+                              year: "numeric"
+                            })
+                          : "Present (Active recipient)"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {!assign.endDate && (
+                  <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 self-start sm:self-auto">
+                    Current Assignee
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {/* Pause History Card */}
@@ -291,6 +378,13 @@ const SubscriptionDetailPage = () => {
         onClose={() => setResumeModalOpen(false)}
         subscription={subscription}
         currentPause={currentOpenPause}
+        onSuccess={fetchSubscriptionDetails}
+      />
+
+      <TransferModal
+        isOpen={transferModalOpen}
+        onClose={() => setTransferModalOpen(false)}
+        subscription={subscription}
         onSuccess={fetchSubscriptionDetails}
       />
     </div>
