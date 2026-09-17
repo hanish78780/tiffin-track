@@ -166,6 +166,24 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 
 **Lesson:** Date arithmetic in Node.js is timezone-sensitive. Pure billing calculations should use UTC throughout to avoid environment-dependent results.
 
+## Frontend Architecture & Decisions
+
+### 1. Technology Choices
+- **React 19 + Vite 8**: Extremely fast Hot Module Reload (HMR) and sub-second production builds (<1s). Avoids heavy framework complexity while delivering high performance.
+- **Tailwind CSS v4**: Utility-first styling configured with `@tailwindcss/vite`. Enables rapid, consistent UI development without CSS bloat or runtime overhead.
+- **React Router v7**: Declarative routing with layout inheritance (`AppLayout` with `<Outlet />`) and route authentication guarding (`ProtectedRoute`).
+- **Axios**: Configured instance with automatic `Authorization: Bearer <token>` injection and global 401 response interceptor for token expiration handling.
+
+### 2. Design Philosophy
+- **Food-Service SaaS Aesthetic**: Clean forest green primary palette (`emerald-700/800`), amber status for paused deliveries, and crisp neutral card backgrounds (`slate-50/white`).
+- **High Readability & Scannability**: Metric cards, status pills with bullet dots, tabular lists with sorting headers, and monospaced styling for phone numbers.
+- **No Decoration without Purpose**: Avoided distracting multi-color gradients in favor of subtle border highlights and soft drop shadows.
+
+### 3. Workflow Optimizations
+- **Guided Customer Onboarding**: Creating a customer immediately prompts the owner to configure a subscription plan for them, eliminating lost customer navigation.
+- **Modal-Based Pause / Resume**: Pausing and resuming subscriptions occur directly via lightweight modals with prefilled dates and notes, refreshing the view in-place without page transitions.
+- **Transparent Pro-Rated Billing**: The `/billing` view displays both the final bill and an interactive step-by-step pipeline (`Plan Price ÷ Total Weekdays = Daily Rate × Served Days = Final Bill`), making the underlying pro-ration logic immediately verifiable.
+
 ## Trade-Offs
 
 | Decision | Trade-Off |
@@ -187,6 +205,5 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 - WhatsApp/SMS notifications for pause/resume/billing
 - Bulk pause for holidays/festivals
 - Dashboard analytics (revenue, active/paused trends)
-- Frontend client (React or Next.js)
 - Docker containerization
 - CI/CD pipeline
