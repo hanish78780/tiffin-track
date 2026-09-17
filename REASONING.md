@@ -1,252 +1,670 @@
 # REASONING.md — TiffinTrack Engineering Reasoning
 
-## Problem Interpretation
+## 1. Problem Interpretation
 
-The core business problem: a tiffin service delivers lunch on weekdays (Mon–Fri). Customers subscribe monthly, but may pause for travel, festivals, etc. At month-end, the owner needs an accurate bill that charges only for days the customer was actually served.
+TiffinTrack models a home-style weekday lunch service. Customers subscribe to a monthly plan, receive lunch Monday-Friday, and can temporarily pause service. The owner needs accurate billing for the days lunch was actually served.
 
-Key insight: "pro-rated for days actually delivered" means we must count only weekday delivery days, subtract paused weekdays, and calculate `(monthlyPrice / totalWeekdays) × servedDays`.
+The central business rule is:
 
-## Assumptions
+```text
+totalWeekdays = weekdays in the billing month
+pausedDays    = unique paused weekdays within the billing window
+servedDays    = eligible weekdays - pausedDays
+dailyRate     = monthlyPrice / totalWeekdays
+totalBill     = round(dailyRate * servedDays, 2)
+```
 
-1. **Weekday-only delivery.** Saturday and Sunday are never delivery days, regardless of pause status.
-2. **One active subscription per customer.** MVP simplification — a customer cannot have two concurrent active plans.
-3. **Pause boundaries are inclusive.** A pause from Sep 10 to Sep 15 means service is paused on both Sep 10 and Sep 15.
-4. **Open-ended pauses.** When a subscription is paused but not yet resumed, `endDate = null`. For billing, this is treated as paused through the end of the requested month.
-5. **Calendar-month billing.** Bills are calculated per calendar month. The monthly price applies to the total weekdays in that month — not a fixed number like "22 days."
-6. **Multi-tenant.** Each registered user is an independent tiffin-service owner. All business data is scoped to the owner who created it.
+The application also implements three Builder Challenge twists:
 
-## Database Design
+- **T1:** morning delivery notifications through a clock-triggered durable outbox;
+- **T6:** mid-cycle subscription transfer with historical ownership and split billing; and
+- **T4:** messy customer CSV import with normalization, deduplication, rejection, and reporting.
 
-### Why Four Models?
+The design goal is not to simulate a large enterprise platform. It is to make the core business lifecycle correct, auditable, owner-scoped, and easy to operate.
 
-| Model | Purpose |
-|-------|---------|
-| **User** | Owner/admin account. Authentication target. |
-| **Customer** | The person receiving tiffin. Looked up by phone. |
-| **Subscription** | The active plan connecting a customer to a price. Tracks status (active/paused). |
-| **PausePeriod** | A discrete record of a pause interval. Separate from the subscription to support history and multiple pauses. |
+---
 
-### Why PausePeriods Are Separate Records
+## 2. Architectural Principles
 
-Storing pauses as a sub-array inside Subscription would work initially, but separate documents provide:
+The implementation follows five priorities:
 
-1. **Queryability.** We can efficiently query all pauses for a subscription, filter by date ranges, and join with billing.
-2. **History.** Each pause/resume cycle is an immutable record. The subscription only tracks current status.
-3. **Overlap detection.** Separate records make it trivial to check for conflicting/open pauses.
-4. **Audit trail.** We can answer "how many times did customer X pause?" or "what's the longest pause?" without parsing arrays.
+1. **Business correctness** — billing is derived from actual calendar service days.
+2. **Historical integrity** — lifecycle changes do not overwrite facts required for past billing.
+3. **Tenant isolation** — every business record belongs to the authenticated owner.
+4. **Idempotency** — repeated operational triggers do not create duplicate delivery events.
+5. **Simple workflows** — common owner operations remain accessible from the UI without unnecessary navigation.
 
-### Compound Unique Index on Phone
+The stack is intentionally conventional:
 
-Phone numbers are unique per owner, not globally:
+- React + Vite + Tailwind for the client;
+- Express + Mongoose for the API;
+- MongoDB for durable business state; and
+- Jest for backend regression and business-rule tests.
+
+---
+
+## 3. Data Model
+
+### User
+
+Represents a tiffin-service owner/account.
+
+```text
+User
+- name
+- email
+- passwordHash
+```
+
+Passwords are hashed with bcryptjs. The API never returns password hashes.
+
+### Customer
+
+Represents the person receiving lunch.
+
+```text
+Customer
+- name
+- phone
+- address
+- ownerId
+```
+
+The compound unique index:
 
 ```js
 customerSchema.index({ ownerId: 1, phone: 1 }, { unique: true });
 ```
 
-This allows two different tiffin-service owners to independently manage customers who share a phone number, without data collisions.
+means the same phone can exist under two independent tiffin-service owners without creating a cross-tenant collision.
 
-## Ownership Model
+### Subscription
 
-Every business model carries an `ownerId` field referencing the User who created it. Every database query on business data includes `ownerId: req.user.id` in the filter. This is the primary multi-tenant isolation mechanism.
+Represents the monthly commercial plan.
 
-The `ownerId` is always derived from the JWT — never accepted from the request body. This prevents:
-- IDOR (Insecure Direct Object Reference) vulnerabilities
-- Cross-tenant data leakage
-- Privilege escalation
-
-When a resource is not found (either because it doesn't exist or it belongs to another owner), the API returns a generic `404` response. This avoids revealing whether a resource exists under another account.
-
-## Billing Calculation Approach
-
-The billing engine (`server/utils/billing.js`) is a pure function with no database dependencies:
-
-```
-calculateBill({ monthlyPrice, year, month, pausePeriods })
+```text
+Subscription
+- customerId
+- ownerId
+- planName
+- monthlyPrice
+- startDate
+- status
 ```
 
-### Algorithm
+The subscription remains the stable plan/cycle object even when ownership changes during T6 transfer.
 
-1. **Count total weekdays.** Iterate every day in the calendar month. Count Mon–Fri.
-2. **Count paused weekdays.** For each pause period, clamp its boundaries to the month. Walk each day in the clamped range. If it's a weekday, add its ISO date string to a `Set`.
-3. **The `Set` prevents double-counting.** If two pause periods overlap on the same weekday, it's only counted once.
-4. **Calculate served days.** `totalWeekdays - pausedDays`.
-5. **Calculate bill.** `(monthlyPrice / totalWeekdays) × servedDays`, rounded to 2 decimal places.
+### PausePeriod
 
-### Why a Set for Paused Days?
+Represents one pause interval.
 
-Multiple pause periods can overlap — for example, if the owner accidentally records two overlapping pauses, or pauses are edited after creation. The `Set<string>` keyed on ISO date strings (`"2026-09-10"`) naturally deduplicates, so overlapping pauses never inflate the paused-day count.
+```text
+PausePeriod
+- subscriptionId
+- ownerId
+- startDate
+- endDate
+- reason
+```
 
-### Why Not Hard-Code 22 Days?
+A nullable `endDate` represents an open pause until the customer resumes.
 
-Different months have different weekday counts:
-- September 2026: 22 weekdays
-- August 2026: 21 weekdays
-- February 2024 (leap): 21 weekdays
-- February 2023 (non-leap): 20 weekdays
+### SubscriptionAssignment
 
-The daily rate must reflect the actual month. Hard-coding would produce incorrect bills in months with fewer or more weekdays.
+Introduced for T6 historical ownership.
 
-### Currency Rounding
+```text
+SubscriptionAssignment
+- subscriptionId
+- ownerId
+- customerId
+- startDate
+- endDate
+```
 
-The daily rate and total bill are rounded to 2 decimal places using `parseFloat(value.toFixed(2))`. The total bill is computed from the unrounded daily rate to minimize rounding error.
+An assignment answers the historical question:
 
-## API Design
+> Which customer held this subscription on a particular date?
 
-### RESTful Conventions
+This is essential because changing `subscription.customerId` alone would destroy the information required to split historical billing correctly.
 
-- Nouns for resources (`/customers`, `/subscriptions`)
-- HTTP verbs for actions (`GET`, `POST`, `PUT`)
-- Sub-resources for actions on a resource (`/subscriptions/:id/pause`)
-- Query parameters for filtering, pagination, sorting
-- Consistent JSON response format (`{ success, data, message }`)
+### NotificationOutbox
 
-### Pause/Resume as POST, Not PATCH
+Introduced for T1 durable delivery events.
 
-Pause and resume are modeled as POST actions (`POST /subscriptions/:id/pause`) rather than PATCH operations because they create side effects (PausePeriod creation, status change). They're not simple field updates — they're business operations.
+Each notification is keyed by a deterministic delivery event key:
 
-## Authentication Approach
+```text
+${subscriptionId}_${deliveryDate}
+```
 
-- **bcryptjs** for password hashing (salt factor 10).
-- **JWT** with a 7-day expiry, containing only `{ userId }`.
-- The auth middleware extracts and verifies the JWT, attaches `req.user = { id }`.
-- Password hashes are never returned in API responses (`-password` projection or selective field return).
-
-## Validation
-
-- Required fields are checked in controllers before database operations.
-- MongoDB ObjectIds are validated before querying (`mongoose.Types.ObjectId.isValid()`).
-- Month format is validated with regex (`/^\d{4}-(0[1-9]|1[0-2])$/`).
-- Price must be positive. Subscription status transitions are validated (can't pause an already-paused subscription).
-- Mongoose schema-level validation provides a second layer (required, min, enum, match).
-
-## Testing Approach
-
-### Billing Engine Tests (Jest)
-
-24 test cases covering:
-- Weekday calculation for standard months, leap years, non-leap years
-- Full month, no pauses
-- Single weekday pause
-- Pause spanning a weekend (weekends don't count)
-- Multiple non-overlapping pauses
-- Overlapping pauses (no double-counting)
-- Pause extending before/after the month (clamping)
-- February with leap year (2024, 29 days, 21 weekdays)
-- February without leap year (2023, 28 days, 20 weekdays)
-- Leap day pause (Feb 29, 2024)
-- Different weekday counts across months (dailyRate variation)
-- Open-ended pause (null endDate clamped to month end)
-- Weekend-only pause (0 paused days)
-- Currency rounding verification (2 decimal places)
-- Cross-month open pause (pause spanning into subsequent month → entire month paused, ₹0 bill)
-- Cross-month resume mid-month (partial pause charge)
-- Same-month billing when open pause starts mid-month
-- Entire month paused (₹0 bill)
-
-### Authorization Tests (Jest)
-
-13 test cases verifying ownership isolation:
-- Owner access to own resources (positive)
-- Cross-owner access denied for customers, subscriptions, pauses
-- Phone search scoped to owner
-- List queries never leak cross-owner records
-- Billing ownership chain (customer → subscription → pause periods)
-
-No live MongoDB required — tests use mock data simulating the ownership-scoped query pattern.
-
-## Bugs Encountered and Fixes
-
-### Bug: Timezone mismatch in billing engine (3 test failures)
-
-**Symptom:** Three billing tests failed — "pause extending past end of month" expected 3 paused days but got 2, "February 2024 leap day" expected 1 but got 0, and "open-ended pause" expected 7 but got 6. All were off-by-one on the last day.
-
-**Root cause:** Mixed use of local-time and UTC date constructors. Month boundaries were created with `new Date(year, month-1, day)` (local timezone), while pause dates from string input like `new Date("2026-09-28")` produce UTC midnight. In IST (UTC+5:30), local midnight Sep 30 = Sep 29 18:30 UTC, so comparing a UTC pause date against a local-time month-end excluded the last day of the month.
-
-**Fix:** Rewrote the entire billing engine to use UTC exclusively — `Date.UTC()` for all date creation, `getUTCDay()` for weekday checks, and millisecond arithmetic (`+= 86400000`) for date iteration instead of `setDate()`. Added a `toUTCMidnight()` helper to normalize any date input to a UTC midnight timestamp.
-
-**Lesson:** Date arithmetic in Node.js is timezone-sensitive. Pure billing calculations should use UTC throughout to avoid environment-dependent results.
-
-## Frontend Architecture & Decisions
-
-### 1. Technology Choices
-- **React 19 + Vite 8**: Extremely fast Hot Module Reload (HMR) and sub-second production builds (<1s). Avoids heavy framework complexity while delivering high performance.
-- **Tailwind CSS v4**: Utility-first styling configured with `@tailwindcss/vite`. Enables rapid, consistent UI development without CSS bloat or runtime overhead.
-- **React Router v7**: Declarative routing with layout inheritance (`AppLayout` with `<Outlet />`) and route authentication guarding (`ProtectedRoute`).
-- **Axios**: Configured instance with automatic `Authorization: Bearer <token>` injection and global 401 response interceptor for token expiration handling.
-
-### 2. Design Philosophy
-- **Food-Service SaaS Aesthetic**: Clean forest green primary palette (`emerald-700/800`), amber status for paused deliveries, and crisp neutral card backgrounds (`slate-50/white`).
-- **High Readability & Scannability**: Metric cards, status pills with bullet dots, tabular lists with sorting headers, and monospaced styling for phone numbers.
-- **No Decoration without Purpose**: Avoided distracting multi-color gradients in favor of subtle border highlights and soft drop shadows.
-
-### 3. Workflow Optimizations
-- **Guided Customer Onboarding**: Creating a customer immediately prompts the owner to configure a subscription plan for them, eliminating lost customer navigation.
-- **Transparent Pro-Rated Billing**: The `/billing` view displays both the final bill and an interactive step-by-step pipeline (`Plan Price ÷ Total Weekdays = Daily Rate × Served Days = Final Bill`), making the underlying pro-ration logic immediately verifiable.
+A unique database constraint makes the delivery trigger idempotent.
 
 ---
 
-## Builder Challenge Twists Architecture & Rationale
+## 4. Multi-Tenant Ownership
 
-### 1. Level 1 — T1: Delivery Notifications & Outbox Pattern
+Every registered user represents an independent tiffin service.
 
-#### Why Server-Side and Idempotent?
-- **Automated Lifecycle vs Frontend Dependency:** Daily delivery operations in food delivery cannot depend on the tiffin owner keeping a browser tab open. The eligibility check and notification dispatch must be fully deterministic, headless, and server-side.
-- **Idempotency via Unique Event Key:** Clock advancements can trigger multiple times (e.g., retried clock ticks, automated scheduler replays, distributed workers). If `/clock` is called repeatedly for the same business date (e.g. `2026-09-14`), generating duplicate customer messages would result in confusion and real-world delivery errors.
-- **Durable Outbox Pattern:** Notifications are written to `NotificationOutbox` using a composite unique constraint `deliveryEventKey: ${subscriptionId}_${deliveryDate}`. A duplicate run cleanly catches MongoDB error code 11000 and skips insertion without aborting the batch, guaranteeing exactly-once delivery notification semantics.
-- **Strict Weekday and Pause Boundaries:** Deliveries are Monday–Friday only (`dayOfWeek >= 1 && dayOfWeek <= 5`). Paused subscriptions and subscriptions starting in the future are deterministically filtered out before outbox recording.
+The ownership flow is:
 
-### 2. Level 2 — T6: Subscription Transfer & Split Billing
+```text
+JWT
+ ↓
+req.user.id
+ ↓
+ownerId
+ ↓
+owner-scoped database query
+```
 
-#### Why Simply Mutating `subscription.customerId` Is Catastrophic
-- In a pro-rated subscription system, a customer is billed based on days *actually served*.
-- If a subscription transfer simply overwrote `subscription.customerId = newCustomerId`, the system would lose all historical record of who owned the plan earlier in the month.
-- At month-end, the new customer would be charged for the previous customer's lunch meals, and the previous customer would receive an artificial ₹0 bill.
+`ownerId` is never trusted from request body or query parameters.
 
-#### The `SubscriptionAssignment` Solution
-- Rather than destroying historical context or creating duplicate subscriptions with overlapping cycle dates, we introduced `SubscriptionAssignment`.
-- Each assignment tracks `(subscriptionId, customerId, startDate, endDate)`.
-- When transferred on `transferDate` (e.g. `2026-09-15`):
-  - The previous assignment is finalized with `endDate = 2026-09-14` (inclusive).
-  - A new assignment is opened starting on `2026-09-15` with `endDate = null`.
-- **Preservation of Plan and Cycle:**
-  - The plan price (e.g., ₹3,000) and calendar month cycle (e.g., Sep 1 → Sep 30) remain intact.
-  - The daily rate is computed once for the entire plan: `monthlyPrice ÷ totalWeekdays` (e.g. ₹3,000 ÷ 22 = ₹136.3636...).
-  - Billing walks every weekday in the month: if not paused, the day is attributed to whichever customer held the assignment on that date.
-  - Line-item amounts are calculated using the unrounded daily rate and reconciled against the total bill to prevent rounding drift (e.g. `₹1,363.64 + ₹1,636.36 = ₹3,000.00`).
-  - Customer billing lookups (`GET /api/billing/:customerId?month=YYYY-MM`) correctly charge each customer only for their respective served days.
+All business operations are owner-scoped, including:
 
-### 3. Level 3 — T4: Messy Customer Import
+- customers;
+- subscriptions;
+- pause periods;
+- subscription assignments;
+- billing;
+- imports; and
+- delivery notification generation.
 
-#### Normalization Before Deduplication
-- Real-world CSV customer data is riddled with formatting inconsistencies: spaces (`98765 43210`), dashes (`98765-43210`), international codes (`+91 9876543210`), leading zeros (`09876543210`), and mixed date formats (`YYYY-MM-DD`, `DD/MM/YYYY`, `9-1-2026`).
-- Deduplicating raw text without prior normalization leads to severe data contamination: `98765 43210` and `98765-43210` would be treated as two different customers, causing duplicate database records and double-billing.
-- By running phone and date normalization *first*, all numbers are transformed into canonical 10-digit strings and dates into UTC midnight timestamps before any uniqueness checks occur.
+When a requested resource does not exist or belongs to another owner, the API uses the application's generic not-found behavior where appropriate. This avoids leaking another tenant's resource existence.
 
-#### Independent Row Processing & Atomic Per-Row Creation
-- Rejecting an entire CSV file because of one malformed row (e.g., a blank name on row 12) is terrible user experience for a tiffin owner uploading 100+ customers.
-- Conversely, allowing a row to create a Customer without a Subscription leads to orphaned records.
-- **Strategy:** Each row is processed independently. A valid row creates both the Customer, Subscription, and initial Assignment. If a phone is already present in the batch or in the owner's database, it is safely recorded as `deduped`. If essential fields are invalid, it is counted as `rejected` with an explicit reason. The final response returns `{ imported, deduped, rejected }` along with granular row-level reports.
+This model is intentionally enforced at the database-query/controller boundary rather than relying on frontend filtering.
 
-## Trade-Offs
+---
 
-| Decision | Trade-Off |
-|----------|-----------|
-| **No test database** | Authorization tests use mock data instead of a live MongoDB. Faster and simpler for MVP, but doesn't test actual Mongoose queries. |
-| **No rate limiting** | The MVP doesn't implement rate limiting. Should be added before production deployment. |
-| **No refresh tokens** | JWTs expire in 7 days with no refresh mechanism. Acceptable for MVP. |
-| **One subscription per customer** | Simplifies the data model but means a customer can't switch plans without ending the current one. |
-| **No soft deletes** | Customers and subscriptions can't be "archived." A future improvement. |
-| **No request logging** | No morgan or winston logging. Should be added for production observability. |
+## 5. Billing Design
 
-## Future Improvements
+### Why Calendar Weekdays?
 
-- Refresh token rotation for better auth UX
-- Rate limiting and request throttling
-- Request logging (morgan/winston)
-- Delivery-boy assignment and route optimization
-- Payment gateway integration (Razorpay/Stripe)
-- WhatsApp/SMS notifications for pause/resume/billing
-- Bulk pause for holidays/festivals
-- Dashboard analytics (revenue, active/paused trends)
-- Docker containerization
-- CI/CD pipeline
+The service operates Monday-Friday. Therefore a fixed assumption such as 22 service days is incorrect because months have different weekday counts.
+
+Examples:
+
+```text
+September 2026 = 22 weekdays
+August 2026    = 21 weekdays
+February 2024  = 21 weekdays
+February 2023  = 20 weekdays
+```
+
+The billing engine therefore walks the selected calendar month and counts Monday-Friday dynamically.
+
+### Why a Set for Pauses?
+
+Multiple pause records may overlap. If each pause simply incremented a counter, an overlapping weekday could be deducted twice.
+
+The implementation stores normalized ISO date strings in a `Set`:
+
+```text
+2026-09-10
+2026-09-11
+2026-09-14
+```
+
+The same weekday appearing in two pause intervals is therefore counted only once.
+
+### Pause Boundaries
+
+Pause start and end dates are inclusive.
+
+A pause from Sep 10 through Sep 15 includes both boundary dates. Weekends inside the interval are ignored because they were never delivery days.
+
+### Cross-Month Pauses
+
+Pause intervals are clamped to the requested billing window. This supports pauses that begin before the month, end after the month, or remain open-ended.
+
+### Currency Rounding
+
+The exact daily rate is retained internally:
+
+```text
+3000 / 22 = 136.363636...
+```
+
+The final total is rounded to two decimal places. This avoids compounding an intermediate two-decimal rounding error.
+
+For September 2026:
+
+```text
+Monthly price = ₹3,000
+Weekdays = 22
+Pause = Sep 10-15
+Paused weekdays = 4
+Served weekdays = 18
+
+Final bill = 18 × (3000 / 22)
+           = ₹2,454.55
+```
+
+---
+
+## 6. Current-Month Billing Cutoff
+
+A completed month and an in-progress month have different billing windows.
+
+### Past Month
+
+The entire calendar month is evaluated.
+
+### Current Month
+
+The billing window ends on the current calendar date. Future weekdays are not yet served and therefore cannot be billed.
+
+The important invariant is that the daily rate still comes from the complete month's weekday count:
+
+```text
+dailyRate = monthlyPrice / totalWeekdaysInMonth
+```
+
+We do **not** change the daily rate to `monthlyPrice / weekdaysElapsed`, because that would change the economics of the monthly plan simply because the month is incomplete.
+
+### Future Month
+
+A future month does not contain completed service days and is not treated as a normal completed-month bill.
+
+### Date Safety
+
+Billing uses UTC-safe calendar calculations. The implementation avoids mixing local-time constructors with UTC dates, which previously caused last-day-of-month and leap-day off-by-one failures in IST environments.
+
+---
+
+## 7. T1 — Delivery Notifications & Outbox
+
+### Eligibility
+
+For a target clock date, a delivery notification is generated only if:
+
+1. the date is Monday-Friday;
+2. the subscription has started by the target date;
+3. the subscription is active for that date;
+4. no pause period covers that date;
+5. a valid customer assignment exists for the date; and
+6. owner isolation is satisfied.
+
+This is calculated server-side so the operation does not depend on a browser being open.
+
+### Clock Trigger
+
+The clock endpoint advances the business date and evaluates eligible subscriptions. The challenge-compatible endpoints include `/clock` and `/api/clock`.
+
+The generated events are exposed through `/outbox` and `/api/outbox` for inspection.
+
+### Idempotency
+
+The event key is:
+
+```text
+subscriptionId + deliveryDate
+```
+
+and is protected by a unique MongoDB constraint.
+
+If the same clock date is processed twice, the second attempt does not create a second delivery event for the same subscription/date.
+
+This is preferable to relying on a frontend flag because retries and scheduler replays can happen independently of the UI.
+
+### Why an Outbox?
+
+The outbox separates the business decision "this customer is due today" from notification transport. The event is first made durable, so notification processing can be retried without recomputing the underlying eligibility decision or generating duplicate events.
+
+---
+
+## 8. T6 — Subscription Transfer
+
+### Why Not Mutate `subscription.customerId`?
+
+Consider:
+
+```text
+Customer A owns the plan Sep 1-Sep 14
+Customer B owns the plan Sep 15-Sep 30
+```
+
+If the application simply changed:
+
+```js
+subscription.customerId = customerB;
+```
+
+the database would no longer contain enough information to know that Customer A was served during the first part of the month.
+
+That would cause incorrect billing and destroy historical information.
+
+### Assignment Intervals
+
+Instead, transfer closes the previous assignment on the day before the transfer and creates a new assignment beginning on the transfer date.
+
+Example:
+
+```text
+Customer A
+Sep 1 → Sep 14
+
+Customer B
+Sep 15 → Sep 30
+```
+
+The plan itself remains unchanged:
+
+```text
+Plan name       = unchanged
+Monthly price   = unchanged
+Original cycle  = unchanged
+```
+
+### Split Billing
+
+Billing walks each weekday and asks:
+
+```text
+Is this date billable?
+Is it paused?
+Which assignment owns this date?
+```
+
+A served weekday is then attributed to the assignment's customer.
+
+The same daily rate is used for all customers on the transferred plan. Customer-level amounts are reconciled so rounded line items still add up to the final bill.
+
+### Transfer to a New Customer
+
+The transfer workflow supports both:
+
+```text
+Existing customer
+```
+
+and:
+
+```text
+New customer
+```
+
+When a new customer is created as part of the transfer, the customer creation and assignment update should be transactional. This prevents an unsuccessful transfer from leaving an orphan customer record.
+
+The owner-scoped `(ownerId, phone)` uniqueness rule is also preserved.
+
+---
+
+## 9. T4 — Messy Customer Import
+
+### Why Normalize Before Deduplicating?
+
+Real-world customer lists frequently contain formatting variations:
+
+```text
+9876543210
+98765 43210
+98765-43210
++91 9876543210
+09876543210
+```
+
+Treating these as raw strings could create duplicate customers.
+
+Phone normalization therefore happens before uniqueness checks.
+
+### Date Normalization
+
+Supported input date forms are parsed into UTC-safe dates according to the documented import convention. The importer does not rely on the JavaScript runtime's ambiguous general-purpose date parser for business dates.
+
+### Row-Level Processing
+
+The importer intentionally handles rows independently:
+
+```text
+valid row
+→ imported
+
+duplicate row
+→ deduped
+
+invalid row
+→ rejected
+```
+
+A malformed row should not prevent unrelated valid customers from being imported.
+
+### Atomic Customer + Subscription Creation
+
+A valid row creates the complete initial lifecycle:
+
+```text
+Customer
++
+Subscription
++
+Initial SubscriptionAssignment
+```
+
+These records must not be left partially created when the row fails.
+
+### Import Report
+
+The API returns the required top-level result:
+
+```text
+imported
+ deduped
+ rejected
+```
+
+along with row-level details and reasons. This gives the owner an actionable explanation of what happened to every input row.
+
+---
+
+## 10. Customer Deletion
+
+Deletion is intentionally constrained by lifecycle state.
+
+A customer with an active subscription should not be silently removed because doing so could invalidate current service and billing relationships.
+
+The delete workflow therefore checks ownership and active subscription state before deleting.
+
+Historical records required for billing, such as transfer assignments, must not be destroyed merely because a customer record is being removed.
+
+This is a deliberate integrity rule rather than a convenience CRUD operation.
+
+---
+
+## 11. API Design
+
+The API uses resource-oriented paths and explicit action endpoints for state transitions.
+
+Examples:
+
+```text
+GET  /api/customers
+POST /api/customers
+PUT  /api/customers/:id
+DELETE /api/customers/:id
+
+POST /api/subscriptions/:id/pause
+POST /api/subscriptions/:id/resume
+POST /api/subscriptions/:id/transfer
+
+GET /api/billing/:customerId?month=YYYY-MM
+```
+
+Pause, resume, and transfer are modeled as POST actions because they represent business operations with side effects, rather than arbitrary partial field updates.
+
+Filtering, pagination, and sorting use query parameters so the customer and subscription lists can remain server-side and scalable.
+
+---
+
+## 12. Authentication
+
+The application uses JWT authentication.
+
+The JWT payload contains only the user identifier needed by the authorization layer:
+
+```text
+{ userId }
+```
+
+The middleware verifies the token and exposes:
+
+```text
+req.user = { id }
+```
+
+Passwords are hashed with bcryptjs before persistence.
+
+The frontend stores the authentication token and restores the session through `/api/auth/me`. Protected routes redirect unauthenticated users to the login flow.
+
+---
+
+## 13. Validation and Error Handling
+
+Validation happens at more than one layer:
+
+- controller validation for request-specific business rules;
+- Mongoose schema validation for persisted data; and
+- explicit ObjectId/date/month validation before database operations.
+
+The API uses consistent HTTP semantics:
+
+```text
+400 → invalid input
+401 → unauthenticated
+404 → resource not found / cross-owner resource
+409 → lifecycle or uniqueness conflict
+500 → unexpected server error
+```
+
+A centralized error handler prevents database internals and stack traces from becoming API responses.
+
+---
+
+## 14. Testing Strategy
+
+The test suite focuses on business invariants and tenant isolation rather than only happy-path controller responses.
+
+The latest completed twist suite contains 65 tests:
+
+```text
+Billing                         24
+Authorization / ownership      13
+T1 Clock / Outbox                8
+T6 Transfer / Split Billing    12
+T4 Import                        8
+--------------------------------
+Total                           65
+```
+
+### Billing
+
+Tests cover:
+
+- weekday counts;
+- leap and non-leap February;
+- single pauses;
+- weekend-spanning pauses;
+- multiple pauses;
+- overlapping pauses;
+- partial month pauses;
+- open-ended pauses;
+- cross-month pauses and resumes;
+- entire-month pauses;
+- rounding; and
+- historical transfer billing.
+
+### Authorization
+
+Tests verify that owners can access their own resources while cross-owner customer, subscription, pause, phone lookup, and billing access is isolated.
+
+### T1
+
+Tests verify:
+
+- weekday notification generation;
+- weekend exclusion;
+- pause exclusion;
+- mixed eligibility;
+- duplicate clock idempotency;
+- future subscription exclusion; and
+- owner isolation.
+
+### T6
+
+Tests verify:
+
+- mid-cycle transfer;
+- transfer with pauses;
+- first/last-day transfers;
+- historical assignment preservation;
+- split billing;
+- invalid transfer dates;
+- missing/cross-owner targets; and
+- lifecycle conflict handling.
+
+### T4
+
+Tests verify:
+
+- phone normalization;
+- date parsing;
+- quoted CSV parsing;
+- clean import;
+- in-batch deduplication;
+- database deduplication;
+- row rejection; and
+- multi-tenant isolation.
+
+The frontend production build is also checked separately with Vite.
+
+---
+
+## 15. Important Bug and Lesson
+
+### Timezone mismatch in the billing engine
+
+The first billing implementation mixed local-time date construction with UTC dates parsed from ISO strings. In an IST environment this caused month-end and leap-day comparisons to shift across calendar boundaries.
+
+The solution was to make the billing engine UTC-consistent:
+
+- `Date.UTC()` for date creation;
+- `getUTCDay()` for weekday detection;
+- UTC midnight normalization; and
+- millisecond-based day iteration.
+
+The lesson is that calendar billing is a date-domain problem, not a timestamp-domain problem. The implementation must make its calendar timezone explicit rather than relying on the host machine's local timezone.
+
+---
+
+## 16. Trade-Offs
+
+| Decision | Reason / Trade-Off |
+|---|---|
+| MongoDB + Mongoose | Natural fit for the small document-oriented domain and rapid MVP development. |
+| One active subscription per customer | Keeps lifecycle rules simple for the challenge; more complex plan switching can be added later. |
+| Separate PausePeriod documents | Makes pause history and date-range queries straightforward. |
+| SubscriptionAssignment for transfers | Adds a model but preserves historical billing correctness. |
+| Durable outbox | Adds persistence and a unique key, but makes notification generation retry-safe. |
+| Per-row import processing | More implementation work, but one malformed row does not destroy an otherwise valid import. |
+| No soft delete | Simpler MVP lifecycle; historical retention policy can be expanded later. |
+| Mock-based authorization tests | Fast isolation tests; a future production suite should also include database-backed integration tests. |
+| JWT without refresh tokens | Simple MVP authentication with a finite token lifetime. |
+
+---
+
+## 17. Future Improvements
+
+The following are intentionally outside the current Builder Challenge scope:
+
+- refresh-token rotation;
+- rate limiting;
+- structured request logging and observability;
+- delivery route optimization;
+- payment gateway integration;
+- WhatsApp/SMS provider integration;
+- bulk holiday pause management;
+- richer revenue analytics;
+- database-backed end-to-end test environments; and
+- CI/CD deployment automation.
+
+These are future extensions rather than prerequisites for the core subscription, pause/resume, transfer, notification, import, and billing workflows.
