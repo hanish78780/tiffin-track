@@ -332,4 +332,93 @@ describe("Billing Engine", () => {
       expect(totalBillDecimals ? totalBillDecimals.length : 0).toBeLessThanOrEqual(2);
     });
   });
+
+  // -------------------------------------------------------------------
+  // Cross-month open pause scenarios
+  // These test the critical workflow:
+  //   1. Pause mid-September (endDate = null)
+  //   2. Bill October while pause is still open → ₹0
+  //   3. Resume on Oct 6, then re-bill October → partial charge
+  // -------------------------------------------------------------------
+  describe("Cross-month open pause", () => {
+    test("open pause from previous month — entire next month paused, ₹0 bill", () => {
+      // Pause started Sep 22, still open (endDate = null)
+      // Billing October 2026: all 22 weekdays should be paused
+      // Oct 2026: starts Thursday → 22 weekdays
+      const result = calculateBill({
+        monthlyPrice: 3000,
+        year: 2026,
+        month: 10,
+        pausePeriods: [
+          { startDate: "2026-09-22", endDate: null }
+        ]
+      });
+
+      expect(result.totalWeekdays).toBe(22);
+      expect(result.pausedDays).toBe(22);
+      expect(result.servedDays).toBe(0);
+      expect(result.totalBill).toBe(0);
+    });
+
+    test("after resume — only partial October is paused", () => {
+      // Pause: Sep 22 → Oct 6 (inclusive, both boundary dates paused)
+      // October paused weekdays: Oct 1 (Thu), 2 (Fri), 5 (Mon), 6 (Tue) = 4
+      // Served: 22 - 4 = 18
+      const result = calculateBill({
+        monthlyPrice: 3000,
+        year: 2026,
+        month: 10,
+        pausePeriods: [
+          { startDate: "2026-09-22", endDate: "2026-10-06" }
+        ]
+      });
+
+      expect(result.totalWeekdays).toBe(22);
+      expect(result.pausedDays).toBe(4);
+      expect(result.servedDays).toBe(18);
+      expect(result.dailyRate).toBeCloseTo(136.36, 2);
+      expect(result.totalBill).toBeCloseTo(2454.55, 2);
+    });
+
+    test("September billing is correct when pause started mid-September (open)", () => {
+      // Pause started Sep 22 (Tue), endDate = null
+      // September paused weekdays: Tue 22, Wed 23, Thu 24, Fri 25,
+      //   Mon 28, Tue 29, Wed 30 = 7
+      // Served: 22 - 7 = 15
+      const result = calculateBill({
+        monthlyPrice: 3000,
+        year: 2026,
+        month: 9,
+        pausePeriods: [
+          { startDate: "2026-09-22", endDate: null }
+        ]
+      });
+
+      expect(result.totalWeekdays).toBe(22);
+      expect(result.pausedDays).toBe(7);
+      expect(result.servedDays).toBe(15);
+      expect(result.totalBill).toBeCloseTo(2045.45, 2);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Edge case: pause covers entire month
+  // -------------------------------------------------------------------
+  describe("Entire month paused", () => {
+    test("pause covering the whole month results in ₹0 bill", () => {
+      const result = calculateBill({
+        monthlyPrice: 3000,
+        year: 2026,
+        month: 9,
+        pausePeriods: [
+          { startDate: "2026-08-25", endDate: "2026-10-05" }
+        ]
+      });
+
+      expect(result.totalWeekdays).toBe(22);
+      expect(result.pausedDays).toBe(22);
+      expect(result.servedDays).toBe(0);
+      expect(result.totalBill).toBe(0);
+    });
+  });
 });

@@ -123,20 +123,25 @@ Pause and resume are modeled as POST actions (`POST /subscriptions/:id/pause`) r
 
 ### Billing Engine Tests (Jest)
 
-14 test cases covering:
+24 test cases covering:
+- Weekday calculation for standard months, leap years, non-leap years
 - Full month, no pauses
 - Single weekday pause
 - Pause spanning a weekend (weekends don't count)
 - Multiple non-overlapping pauses
 - Overlapping pauses (no double-counting)
 - Pause extending before/after the month (clamping)
-- February with leap year
-- February without leap year
-- Leap day pause
-- Different weekday counts across months
-- Open-ended pause (null endDate)
+- February with leap year (2024, 29 days, 21 weekdays)
+- February without leap year (2023, 28 days, 20 weekdays)
+- Leap day pause (Feb 29, 2024)
+- Different weekday counts across months (dailyRate variation)
+- Open-ended pause (null endDate clamped to month end)
 - Weekend-only pause (0 paused days)
-- Currency rounding verification
+- Currency rounding verification (2 decimal places)
+- Cross-month open pause (pause spanning into subsequent month → entire month paused, ₹0 bill)
+- Cross-month resume mid-month (partial pause charge)
+- Same-month billing when open pause starts mid-month
+- Entire month paused (₹0 bill)
 
 ### Authorization Tests (Jest)
 

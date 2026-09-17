@@ -96,8 +96,9 @@ npm test
 ```
 
 Tests cover:
-- Billing engine (14 test cases)
+- Billing engine (24 test cases covering weekday counts, multiple/overlapping pauses, cross-month open pauses, leap years, rounding)
 - Authorization / ownership isolation (13 test cases)
+- Total: 37 tests passing
 
 ## API Endpoints
 
