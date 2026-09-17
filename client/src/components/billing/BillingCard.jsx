@@ -137,8 +137,8 @@ const BillingCard = ({ billData, customerId, onOpenCreateSub }) => {
           </div>
         </div>
 
-        <p className="text-[11px] text-slate-500 text-center italic">
-          * This bill is calculated from the weekdays actually served during the selected month.
+        <p className="text-xs text-emerald-800 bg-emerald-50/70 border border-emerald-200/60 rounded-xl py-2 px-3 text-center font-medium">
+          You are charged only for weekdays when lunch was actually served.
         </p>
 
         {/* Pause History for this month if any */}

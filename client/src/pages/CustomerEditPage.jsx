@@ -64,10 +64,13 @@ const CustomerEditPage = () => {
       toast.success("Customer updated successfully.");
       navigate(`/customers/${id}`);
     } catch (err) {
-      const msg =
+      let msg =
         err.response?.data?.message ||
         err.message ||
         "Failed to update customer. Please try again.";
+      if (err.response?.status === 409 || msg.includes("Duplicate") || msg.includes("phone")) {
+        msg = "This phone number is already registered to another customer in your account.";
+      }
       setError(msg);
       toast.error(msg);
     } finally {

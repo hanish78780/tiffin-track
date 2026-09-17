@@ -94,13 +94,18 @@ const getSubscriptions = async (req, res, next) => {
       page = 1,
       limit = 10,
       sort = "createdAt",
-      order = "asc"
+      order = "asc",
+      customerId
     } = req.query;
 
     const filter = { ownerId: req.user.id };
 
     if (status && ["active", "paused"].includes(status)) {
       filter.status = status;
+    }
+
+    if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
+      filter.customerId = customerId;
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -159,9 +164,15 @@ const getSubscriptionById = async (req, res, next) => {
       });
     }
 
+    const pausePeriods = await PausePeriod.find({
+      subscriptionId: subscription._id,
+      ownerId: req.user.id
+    }).sort({ createdAt: -1 });
+
     res.json({
       success: true,
-      subscription
+      subscription,
+      pausePeriods
     });
   } catch (error) {
     next(error);

@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { customerService } from "../services/customerService";
 import { subscriptionService } from "../services/subscriptionService";
+import Modal from "../components/common/Modal";
+import Input from "../components/common/Input";
 import SearchBar from "../components/common/SearchBar";
 import Pagination from "../components/common/Pagination";
 import Button from "../components/common/Button";
@@ -29,6 +31,13 @@ const CustomersPage = () => {
   const [order, setOrder] = useState("desc");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Dedicated phone lookup state (GET /api/customers/phone/:phone)
+  const [phoneModalOpen, setPhoneModalOpen] = useState(false);
+  const [lookupPhone, setLookupPhone] = useState("");
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupResult, setLookupResult] = useState(null);
+  const [lookupError, setLookupError] = useState(null);
 
   // Debounce search input by 300ms
   useEffect(() => {
@@ -89,6 +98,29 @@ const CustomersPage = () => {
     }
   };
 
+  const handlePhoneLookup = async (e) => {
+    e.preventDefault();
+    if (!lookupPhone.trim()) {
+      setLookupError("Please enter a phone number.");
+      return;
+    }
+
+    setLookupLoading(true);
+    setLookupError(null);
+    setLookupResult(null);
+
+    try {
+      const data = await customerService.getCustomerByPhone(lookupPhone.trim());
+      setLookupResult(data.customer);
+    } catch (err) {
+      setLookupError(
+        err.response?.data?.message || "No customer found with this phone number."
+      );
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header & Action */}
@@ -99,11 +131,26 @@ const CustomersPage = () => {
             Manage your tiffin customers and subscriptions.
           </p>
         </div>
-        <Link to="/customers/new">
-          <Button variant="primary" size="md" icon={Plus}>
-            Add Customer
+        <div className="flex items-center gap-2.5">
+          <Button
+            variant="outline"
+            size="md"
+            icon={Phone}
+            onClick={() => {
+              setPhoneModalOpen(true);
+              setLookupPhone("");
+              setLookupResult(null);
+              setLookupError(null);
+            }}
+          >
+            Lookup by Phone
           </Button>
-        </Link>
+          <Link to="/customers/new">
+            <Button variant="primary" size="md" icon={Plus}>
+              Add Customer
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Filter and Search Bar */}
@@ -281,6 +328,81 @@ const CustomersPage = () => {
           )}
         </div>
       )}
+
+      {/* Dedicated Phone Lookup Modal (calls GET /api/customers/phone/:phone) */}
+      <Modal
+        isOpen={phoneModalOpen}
+        onClose={() => setPhoneModalOpen(false)}
+        title="Lookup Customer by Phone"
+        subtitle="Search customer records directly by exact phone number."
+        footer={
+          <Button variant="outline" size="sm" onClick={() => setPhoneModalOpen(false)}>
+            Close
+          </Button>
+        }
+      >
+        <form onSubmit={handlePhoneLookup} className="space-y-4">
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <Input
+                label="Phone Number"
+                type="tel"
+                placeholder="e.g. 9876543210"
+                value={lookupPhone}
+                onChange={(e) => setLookupPhone(e.target.value)}
+                prefixIcon={Phone}
+                required
+              />
+            </div>
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              loading={lookupLoading}
+              loadingText="Searching..."
+            >
+              Look Up
+            </Button>
+          </div>
+
+          {lookupError && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-medium">
+              {lookupError}
+            </div>
+          )}
+
+          {lookupResult && (
+            <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-xl space-y-3 animate-fade-in">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">{lookupResult.name}</h4>
+                  <p className="text-xs text-slate-500 font-mono mt-0.5">{lookupResult.phone}</p>
+                </div>
+                <span className="text-xs px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full font-semibold">
+                  Found
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 bg-white p-2.5 rounded-lg border border-emerald-100">
+                <span className="font-semibold text-slate-700">Address:</span> {lookupResult.address}
+              </p>
+
+              <div className="pt-2 flex items-center justify-end gap-2 border-t border-emerald-100">
+                <Link to={`/billing?customerId=${lookupResult._id}`}>
+                  <Button variant="outline" size="sm">
+                    Calculate Bill
+                  </Button>
+                </Link>
+                <Link to={`/customers/${lookupResult._id}`}>
+                  <Button variant="primary" size="sm">
+                    View Full Profile
+                  </Button>
+                </Link>
+              </div>
+            </div>
+          )}
+        </form>
+      </Modal>
     </div>
   );
 };

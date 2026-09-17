@@ -64,13 +64,20 @@ const DashboardPage = () => {
       const activeCount = activeSubData.pagination?.total || 0;
       const pausedCount = pausedSubData.pagination?.total || 0;
 
-      // Sum active subscription monthly prices for estimated monthly billing
-      const activeSubsList = activeSubData.subscriptions || [];
-      const pausedSubsList = pausedSubData.subscriptions || [];
-      const totalEstimatedRev = activeSubsList.reduce(
-        (sum, sub) => sum + (sub.monthlyPrice || 0),
-        0
-      );
+      // Calculate real current-month pro-rated billing from the billing engine
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const billingPromises = activeSubsList.map(async (sub) => {
+        const custId = sub.customerId?._id || sub.customerId;
+        try {
+          const billRes = await billingService.getBill(custId, currentMonth);
+          return billRes.billing?.totalBill ?? (sub.monthlyPrice || 0);
+        } catch {
+          return sub.monthlyPrice || 0;
+        }
+      });
+
+      const billResults = await Promise.all(billingPromises);
+      const currentMonthBillingSum = billResults.reduce((acc, curr) => acc + curr, 0);
 
       // Map customer subscriptions for quick status lookup
       const subMap = {};
@@ -85,7 +92,7 @@ const DashboardPage = () => {
         totalCustomers: totalCustomersCount,
         activeSubscriptions: activeCount,
         pausedSubscriptions: pausedCount,
-        estimatedMonthlyRevenue: totalEstimatedRev
+        currentMonthBilling: currentMonthBillingSum
       });
 
       setRecentCustomers(custData.customers || []);
@@ -199,9 +206,9 @@ const DashboardPage = () => {
         />
 
         <KpiCard
-          label="Active Plan Volume"
-          value={`₹${stats.estimatedMonthlyRevenue.toLocaleString("en-IN")}`}
-          subtitle="Full monthly price of active plans"
+          label="Current Month Billing"
+          value={`₹${(stats.currentMonthBilling || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          subtitle="Pro-rated weekday deliveries this month"
           icon={ReceiptText}
           iconBgColor="bg-blue-50 text-blue-700"
           loading={loading}

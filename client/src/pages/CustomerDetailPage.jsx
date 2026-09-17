@@ -45,15 +45,16 @@ const CustomerDetailPage = () => {
       const custData = await customerService.getCustomerById(id);
       setCustomer(custData.customer);
 
-      // 2. Fetch subscription for this customer
+      // 2. Fetch subscription for this customer using backend customerId filter
       const subData = await subscriptionService.getSubscriptions({
-        limit: 100
+        customerId: id,
+        limit: 1
       });
 
-      // Find subscription belonging to this customer
-      const foundSub = (subData.subscriptions || []).find(
-        (s) => (s.customerId?._id || s.customerId) === id
-      );
+      const foundSub =
+        subData.subscriptions && subData.subscriptions.length > 0
+          ? subData.subscriptions[0]
+          : null;
 
       setSubscription(foundSub || null);
     } catch (err) {
