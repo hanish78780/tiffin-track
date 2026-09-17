@@ -48,8 +48,11 @@ A tiffin service delivers lunch every weekday (Monday through Friday). Customers
 - **Idempotency:** Driven by a durable MongoDB outbox collection with unique compound constraint on `deliveryEventKey` (`${subscriptionId}_${deliveryDate}`). Repeating the clock tick for the same date will not duplicate notifications.
 
 ### 2. Level 2 — T6: Subscription Transfer & Split Billing
-- **Overview:** Allows transferring an ongoing subscription to a new customer mid-cycle.
-- **Endpoint:** `POST /api/subscriptions/:id/transfer` with `{ "newCustomerId": "...", "transferDate": "YYYY-MM-DD" }`.
+- **Overview:** Allows transferring an ongoing subscription to an existing customer or creating a new customer inline mid-cycle.
+- **Endpoint:** `POST /api/subscriptions/:id/transfer` with:
+  - Existing customer: `{ "newCustomerId": "...", "transferDate": "YYYY-MM-DD" }`
+  - Inline customer creation: `{ "newCustomer": { "name": "...", "phone": "...", "address": "..." }, "transferDate": "YYYY-MM-DD" }`
+- **Transactional Safety & Rollback:** Customer creation and transfer assignment are atomic with automatic rollback if downstream transfer operations fail. If the phone already exists for the owner, returns HTTP 409 Conflict.
 - **Preserved Invariants:**
   - Monthly plan price and plan name remain unchanged.
   - Billing cycle and original subscription start date carry over.
@@ -72,6 +75,12 @@ A tiffin service delivers lunch every weekday (Monday through Friday). Customers
 - **Validation & Rejection:** Missing required name, phone, planName, non-positive price, or unparseable dates are safely rejected without failing valid rows.
 - **Report Structure:** Returns clear `{ imported, deduped, rejected }` counts and detailed row-level reports.
 
+### 4. Safe Customer Deletion
+- **Endpoint:** `DELETE /api/customers/:id`
+- **Active Subscription Protection:** If the customer has an active subscription (direct or transferred assignee), deletion is rejected with **HTTP 409 Conflict** (`"Cannot delete customer with an active subscription. Please end or cancel the subscription first."`).
+- **Audit Preservation:** Deleting inactive customers preserves immutable historical `SubscriptionAssignment` records so past billing calculations and audit logs remain intact.
+- **UI:** Interactive confirmation modal on both Customers table and Customer Detail page.
+
 ---
 
 ## Running Backend Tests
@@ -81,7 +90,7 @@ cd server
 npm test
 ```
 
-**Test Suite Coverage (65 Tests Total):**
+**Test Suite Coverage (86 Tests Passing Across 8 Suites):**
 - **Billing Engine (24 tests):**
   - Weekday counts across standard months, leap years (Feb 2024), and non-leap years (Feb 2023)
   - Full month served (no pauses)
@@ -95,10 +104,34 @@ npm test
   - Cross-month resume mid-month: partial month charge
   - Currency rounding: single-step rounding to 2 decimal places
   - Entire month paused: ₹0.00 bill
-- **Authorization & Ownership (13 tests):**
-  - Owner A access vs Owner B denial for customers, subscriptions, pauses, and billing
-  - Phone search scoped strictly to authenticated owner
-  - Cross-owner query isolation
+- **Billing Cutoff & Current Month Rules (9 tests):**
+  - Current month: today in middle of month -> only weekdays through today billed
+  - Current month with pause extending beyond today -> only paused weekdays through today counted
+  - Current month transfer: mid-month transfer only bills weekdays through today and splits correctly
+  - Past month: full month calculated
+  - Future month: HTTP 400 rejection (`"Billing is not available for future months"`)
+  - Weekend cutoff: Saturday/Sunday cutoff only counts weekdays before/equal to today
+  - Completed month regression preservation
+  - Controller metadata validation (`cutoffDate`, `isCurrentMonth`)
+- **Customer Safe Deletion (6 tests):**
+  - Invalid ObjectId returns 400
+  - Cross-owner customer deletion returns 404
+  - Customer with active direct subscription returns 409
+  - Customer with active transferred subscription returns 409
+  - Safe deletion of inactive customer returns 200
+- **Transfer with New Customer Creation (6 tests):**
+  - Transfer to new customer creates Customer, creates Assignment, and transfers Subscription
+  - Duplicate phone for owner returns 409 without creating duplicate
+  - Invalid new customer inputs return 400
+  - Rollback on failure cleans up newly created customer
+  - Multi-owner phone isolation
+  - Billing split between original customer and new customer
+- **T6 Subscription Transfer & Split Billing (12 tests):**
+  - Mid-cycle transfer with accurate weekday-split billing
+  - Transfer with active pause period reconciliation
+  - Transfer on first day and last day of month
+  - Cross-month history preservation
+  - Controller validations: 404 missing target, 400 same customer, 409 target has active plan, 400 transfer date before start date, 404 cross-owner transfer
 - **T1 Delivery Notifications & Clock (8 tests):**
   - Active weekday notification generation
   - Weekend skip (Saturday/Sunday no notifications)
@@ -108,12 +141,6 @@ npm test
   - Future subscription skip (before start date)
   - Cross-owner notification isolation
   - Outbox inspection
-- **T6 Subscription Transfer & Split Billing (12 tests):**
-  - Mid-cycle transfer with accurate weekday-split billing
-  - Transfer with active pause period reconciliation
-  - Transfer on first day and last day of month
-  - Cross-month history preservation
-  - Controller validations: 404 missing target, 400 same customer, 409 target has active plan, 400 transfer date before start date, 404 cross-owner transfer
 - **T4 Messy Customer Import (8 tests):**
   - Phone normalization across formats and prefixes
   - Mixed date format parsing
@@ -124,6 +151,10 @@ npm test
   - Row rejection on missing required fields
   - Full mixed messy dataset processing
   - Multi-owner isolation during import
+- **Authorization & Ownership (13 tests):**
+  - Owner A access vs Owner B denial for customers, subscriptions, pauses, and billing
+  - Phone search scoped strictly to authenticated owner
+  - Cross-owner query isolation
 
 ---
 
@@ -135,14 +166,14 @@ npm test
 | `/login` | Login | Owner authentication with JWT retrieval | No |
 | `/register` | Register | New owner account creation with auto-login | No |
 | `/dashboard` | Dashboard | KPI cards (customers, active/paused subs, volume, today's deliveries), quick actions | Yes |
-| `/customers` | Customers | Full customer table with search, sorting, pagination, Phone Lookup, and CSV Import modal (T4) | Yes |
+| `/customers` | Customers | Full customer table with search, sorting, pagination, Phone Lookup, CSV Import modal (T4), and Delete action | Yes |
 | `/customers/new` | New Customer | Create customer form with prompt to create subscription | Yes |
-| `/customers/:id` | Customer Details | Contact info, linked subscription status, actions | Yes |
+| `/customers/:id` | Customer Details | Contact info, linked subscription status, Edit, Delete, and billing actions | Yes |
 | `/customers/:id/edit` | Edit Customer | Update customer contact & delivery address | Yes |
 | `/subscriptions` | Subscriptions | Table with Active/Paused filter tabs and pause/resume buttons | Yes |
 | `/subscriptions/new` | New Subscription | Assign customer to lunch plan with price & start date | Yes |
-| `/subscriptions/:id` | Subscription Details | Plan status, pause history, ownership transfer history (T6), pause/resume/transfer modals | Yes |
-| `/billing` | Monthly Billing | Customer & month selector, pro-rated bill card, calculation breakdown, customer split breakdown (T6) | Yes |
+| `/subscriptions/:id` | Subscription Details | Plan status, pause history, ownership transfer history (T6), pause/resume/transfer modals (Existing & New customer modes) | Yes |
+| `/billing` | Monthly Billing | Customer & month selector, current-month cutoff banner, pro-rated bill card, calculation breakdown, customer split breakdown (T6) | Yes |
 
 ---
 
@@ -158,6 +189,7 @@ npm test
 - `GET /api/customers` — List/search customers (`search`, `page`, `limit`, `sort`, `order`)
 - `GET /api/customers/:id` — Get customer by ID
 - `PUT /api/customers/:id` — Update customer by ID
+- `DELETE /api/customers/:id` — Safely delete customer (protected by 409 active subscription check)
 - `GET /api/customers/phone/:phone` — Lookup customer by phone
 - `POST /api/customers/import` — Import messy CSV customer list with { imported, deduped, rejected } report (T4)
 
@@ -167,10 +199,11 @@ npm test
 - `GET /api/subscriptions/:id` — Get subscription details with pause and assignment history
 - `POST /api/subscriptions/:id/pause` — Pause subscription (`startDate`, `reason`)
 - `POST /api/subscriptions/:id/resume` — Resume subscription (`resumeDate`)
-- `POST /api/subscriptions/:id/transfer` — Transfer subscription to new customer mid-cycle (T6)
+- `POST /api/subscriptions/:id/transfer` — Transfer subscription to existing customer or create new customer inline (T6)
 
 ### Billing (Owner-Scoped)
-- `GET /api/billing/:customerId?month=YYYY-MM` — Pro-rated bill calculation (supports split breakdown for transferred plans)
+- `GET /api/billing/:customerId?month=YYYY-MM` — Pro-rated bill calculation with current-month cutoff through today in IST (rejects future months with HTTP 400)
+
 
 ### Clock & Outbox (T1 Grader Integration)
 - `POST /clock` (and `POST /api/clock`) — Advance clock and trigger morning delivery notifications

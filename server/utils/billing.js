@@ -99,14 +99,31 @@ const countPausedWeekdays = (year, month, pausePeriods) => {
 };
 
 /**
+ * Get current date in India Standard Time (Asia/Kolkata) as YYYY-MM-DD.
+ * Safe from UTC midnight boundary shifts.
+ */
+const getTodayIST = () => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(new Date());
+};
+
+/**
  * Calculate the pro-rated bill for a subscription in a given month.
- * Supports split billing across transferred customers (T6).
+ * Supports:
+ * - Current month cutoff: only weekdays through asOfDate/today are billable (never future days).
+ * - Completed month: full month calculated.
+ * - Future month: rejected.
+ * - Split billing across transferred customers (T6).
  *
  * Formula:
- *   totalWeekdays  = weekdays in the calendar month
- *   pausedDays     = unique weekdays covered by pause periods
- *   servedDays     = totalWeekdays - pausedDays
+ *   totalWeekdays  = weekdays in the calendar month (basis for plan daily rate)
  *   dailyRate      = monthlyPrice / totalWeekdays
+ *   servedDays     = billable weekdays served through cutoff date
  *   totalBill      = dailyRate * servedDays
  *
  * All currency values are rounded to 2 decimal places.
@@ -118,7 +135,8 @@ const countPausedWeekdays = (year, month, pausePeriods) => {
  * @param {Array}  params.pausePeriods - Array of pause period objects
  * @param {Array}  params.assignments  - Array of assignment objects (T6)
  * @param {Object} params.defaultCustomer - Optional default customer object
- * @returns {Object} Billing breakdown including customerBreakdown
+ * @param {string} [params.asOfDate]   - Cutoff date (YYYY-MM-DD), defaults to null (full month)
+ * @returns {Object} Billing breakdown including customerBreakdown, cutoffDate, isCurrentMonth
  */
 const calculateBill = ({
   monthlyPrice,
@@ -126,28 +144,41 @@ const calculateBill = ({
   month,
   pausePeriods = [],
   assignments = [],
-  defaultCustomer = null
+  defaultCustomer = null,
+  asOfDate = null
 }) => {
-  const totalWeekdays = countWeekdaysInMonth(year, month);
-  const pausedDays = countPausedWeekdays(year, month, pausePeriods);
-  const servedDays = totalWeekdays - pausedDays;
-
-  // Avoid division by zero
-  const dailyRate = totalWeekdays > 0
-    ? parseFloat((monthlyPrice / totalWeekdays).toFixed(2))
-    : 0;
-
-  // Use the unrounded daily rate for the bill total, then round once
-  const totalBill = totalWeekdays > 0
-    ? parseFloat(((monthlyPrice / totalWeekdays) * servedDays).toFixed(2))
-    : 0;
-
-  const customerBreakdown = [];
+  const requestedMonthStr = `${year}-${String(month).padStart(2, "0")}`;
 
   // Month boundaries as UTC timestamps
   const monthStartMs = Date.UTC(year, month - 1, 1);
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const monthEndMs = Date.UTC(year, month - 1, daysInMonth);
+
+  let cutoffUtcMs = monthEndMs;
+  let isCurrentMonth = false;
+  let cutoffDateStr = null;
+
+  if (asOfDate) {
+    const asOfMonthStr = String(asOfDate).slice(0, 7);
+    if (requestedMonthStr > asOfMonthStr) {
+      throw new Error("Billing is not available for future months");
+    }
+    if (requestedMonthStr === asOfMonthStr) {
+      isCurrentMonth = true;
+      cutoffDateStr = asOfDate;
+      const [ay, am, ad] = asOfDate.split("-").map(Number);
+      cutoffUtcMs = Math.min(Date.UTC(ay, am - 1, ad), monthEndMs);
+    }
+  }
+
+  // Count weekdays in the FULL calendar month (agreed daily rate baseline)
+  const totalWeekdays = countWeekdaysInMonth(year, month);
+
+  // Avoid division by zero
+  const dailyRate = totalWeekdays > 0
+    ? parseFloat((monthlyPrice / totalWeekdays).toFixed(2))
+    : 0;
+  const unroundedDailyRate = totalWeekdays > 0 ? monthlyPrice / totalWeekdays : 0;
 
   // Collect paused days as Set of YYYY-MM-DD
   const pausedDaysSet = new Set();
@@ -170,19 +201,34 @@ const calculateBill = ({
     }
   }
 
-  // If assignments are provided, assign served days to respective customers
-  if (assignments && assignments.length > 0) {
-    const customerDayCount = new Map();
+  let weekdaysElapsed = 0;
+  let pausedDays = 0;
+  let servedDays = 0;
+  const customerDayCount = new Map();
 
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dayUtcMs = Date.UTC(year, month - 1, day);
-      const d = new Date(dayUtcMs);
-      const dow = d.getUTCDay();
-      if (dow < 1 || dow > 5) continue; // skip weekend
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dayUtcMs = Date.UTC(year, month - 1, day);
+    // Never include days beyond cutoff date
+    if (dayUtcMs > cutoffUtcMs) {
+      continue;
+    }
 
-      const dateStr = d.toISOString().slice(0, 10);
-      if (pausedDaysSet.has(dateStr)) continue; // skip paused day
+    const d = new Date(dayUtcMs);
+    const dow = d.getUTCDay();
+    if (dow < 1 || dow > 5) continue; // skip weekend
 
+    weekdaysElapsed++;
+    const dateStr = d.toISOString().slice(0, 10);
+
+    if (pausedDaysSet.has(dateStr)) {
+      pausedDays++;
+      continue;
+    }
+
+    servedDays++;
+
+    // If assignments are provided, assign served days to respective customers
+    if (assignments && assignments.length > 0) {
       const matchingAssignment = assignments.find((a) => {
         const aStart = toUTCMidnight(a.startDate);
         const aEnd = a.endDate ? toUTCMidnight(a.endDate) : Infinity;
@@ -216,8 +262,16 @@ const calculateBill = ({
         customerDayCount.get(custId).servedDays++;
       }
     }
+  }
 
-    const unroundedDailyRate = totalWeekdays > 0 ? monthlyPrice / totalWeekdays : 0;
+  // Use unrounded daily rate for the bill total, then round once
+  const totalBill = totalWeekdays > 0
+    ? parseFloat((unroundedDailyRate * servedDays).toFixed(2))
+    : 0;
+
+  const customerBreakdown = [];
+
+  if (assignments && assignments.length > 0) {
     let sumLineAmounts = 0;
 
     for (const item of customerDayCount.values()) {
@@ -259,16 +313,21 @@ const calculateBill = ({
   return {
     monthlyPrice,
     totalWeekdays,
+    weekdaysElapsed,
     pausedDays,
     servedDays,
     dailyRate,
     totalBill,
-    customerBreakdown
+    customerBreakdown,
+    cutoffDate: cutoffDateStr,
+    isCurrentMonth
   };
 };
 
 module.exports = {
   calculateBill,
   countWeekdaysInMonth,
-  countPausedWeekdays
+  countPausedWeekdays,
+  getTodayIST
 };
+

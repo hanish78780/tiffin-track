@@ -227,6 +227,50 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 - Conversely, allowing a row to create a Customer without a Subscription leads to orphaned records.
 - **Strategy:** Each row is processed independently. A valid row creates both the Customer, Subscription, and initial Assignment. If a phone is already present in the batch or in the owner's database, it is safely recorded as `deduped`. If essential fields are invalid, it is counted as `rejected` with an explicit reason. The final response returns `{ imported, deduped, rejected }` along with granular row-level reports.
 
+## Final Product Fixes (Post-QA Audit)
+
+### 1. Customer Safe Deletion Architecture
+
+#### The Active Subscription Constraint (HTTP 409)
+- Allowing a customer with an active subscription (either as direct plan holder or current assignee of a transferred subscription) to be deleted creates severe operational hazards:
+  - Daily delivery runs (`/clock`) attempt to notify non-existent recipients.
+  - Active subscription records become orphaned without a valid recipient entity.
+  - Billing queries fail or produce unresolvable errors.
+- **Resolution:** `DELETE /api/customers/:id` actively checks for any active subscription associated with the customer under the authenticated owner. If found, it returns **HTTP 409 Conflict** with a clear message: `"Cannot delete customer with an active subscription. Please end or cancel the subscription first."`
+
+#### Immutable Audit & Assignment Preservation
+- When an inactive customer (one with ended subscriptions or historical transferred memberships) is deleted, we preserve historical `SubscriptionAssignment` records.
+- **Rationale:** Historical assignments represent immutable audit receipts of past service delivery. Deleting them would corrupt historical billing calculations for previous months.
+
+### 2. Current Month Billing Cutoff & Daily Rate Mechanics
+
+#### The Real-Time Service Invariant
+- Charging customers for days in the future is fundamentally incompatible with the tiffin service model where customers pause on short notice.
+- When generating a bill for the *current calendar month*, the system establishes a cutoff at `today` (evaluated in India Standard Time / `Asia/Kolkata` to prevent UTC date rollbacks).
+- Future weekdays beyond `today` are excluded from `servedDays` and cannot be billed. Future pauses beyond `today` are also excluded from the current billing calculation.
+- Future months (`month > currentMonth`) are rejected with **HTTP 400 Bad Request** (`"Billing is not available for future months"`).
+
+#### Preserving the Plan Economics
+- Crucially, the daily rate remains based on the total weekdays in the complete month: `dailyRate = monthlyPrice / totalWeekdaysInMonth`.
+- Recalculating the daily rate as `monthlyPrice / elapsedWeekdays` would artificially inflate the daily cost for mid-month bills.
+- For completed/past months, the entire calendar month is calculated as before, preserving 100% regression fidelity for all historical invoices.
+
+### 3. Transfer Membership with Inline Customer Creation
+
+#### The Workflow Problem
+- In practice, when a customer gives up their meal subscription mid-month (e.g., leaving a hostel or workplace), the replacement recipient is often a new customer not yet registered in the system.
+- Requiring the owner to leave the transfer modal, navigate to New Customer, register them, and return to the subscription created unnecessary friction.
+
+#### Atomic Customer Creation with Rollback
+- The transfer endpoint (`POST /api/subscriptions/:id/transfer`) was enhanced to accept either `newCustomerId` or `newCustomer: { name, phone, address }`.
+- When creating a customer during transfer:
+  1. Phone uniqueness for the authenticated owner is checked (returning **HTTP 409** if the phone already exists).
+  2. The customer is created and the assignment is transferred inside a transactional boundary.
+  3. If downstream transfer operations encounter an error, newly created customer records are automatically rolled back, preventing orphaned customer entities.
+- The frontend `TransferModal` provides a dual-mode toggle between `Existing Customer` and `+ Create New Customer`, immediately updating the customer directory and subscription assignment history upon completion.
+
+---
+
 ## Trade-Offs
 
 | Decision | Trade-Off |
@@ -235,7 +279,7 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 | **No rate limiting** | The MVP doesn't implement rate limiting. Should be added before production deployment. |
 | **No refresh tokens** | JWTs expire in 7 days with no refresh mechanism. Acceptable for MVP. |
 | **One subscription per customer** | Simplifies the data model but means a customer can't switch plans without ending the current one. |
-| **No soft deletes** | Customers and subscriptions can't be "archived." A future improvement. |
+| **Preserve historical assignments** | Deleting inactive customers keeps historical assignment rows for billing integrity, requiring soft foreign-key references. |
 | **No request logging** | No morgan or winston logging. Should be added for production observability. |
 
 ## Future Improvements
@@ -250,3 +294,4 @@ No live MongoDB required — tests use mock data simulating the ownership-scoped
 - Dashboard analytics (revenue, active/paused trends)
 - Docker containerization
 - CI/CD pipeline
+

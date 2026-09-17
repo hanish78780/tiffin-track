@@ -6,24 +6,37 @@ import Button from "../common/Button";
 import { subscriptionService } from "../../services/subscriptionService";
 import { customerService } from "../../services/customerService";
 import { useToast } from "../../context/ToastContext";
-import { Calendar, ArrowRightLeft, AlertCircle } from "lucide-react";
+import { Calendar, ArrowRightLeft, AlertCircle, User, Phone, MapPin } from "lucide-react";
 
 const TransferModal = ({ isOpen, onClose, subscription, onSuccess }) => {
   const today = new Date().toISOString().slice(0, 10);
+  const [mode, setMode] = useState("existing"); // "existing" or "new"
+
+  // Existing customer mode state
   const [newCustomerId, setNewCustomerId] = useState("");
-  const [transferDate, setTransferDate] = useState(today);
   const [customers, setCustomers] = useState([]);
   const [loadingCustomers, setLoadingCustomers] = useState(false);
+
+  // New customer mode state
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [newCustomerAddress, setNewCustomerAddress] = useState("");
+
+  const [transferDate, setTransferDate] = useState(today);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const toast = useToast();
 
   useEffect(() => {
     if (isOpen) {
+      setMode("existing");
       fetchCustomers();
       setTransferDate(today);
       setError("");
       setNewCustomerId("");
+      setNewCustomerName("");
+      setNewCustomerPhone("");
+      setNewCustomerAddress("");
     }
   }, [isOpen]);
 
@@ -46,25 +59,42 @@ const TransferModal = ({ isOpen, onClose, subscription, onSuccess }) => {
 
   const handleTransfer = async (e) => {
     e.preventDefault();
-    if (!newCustomerId) {
-      setError("Please select the new customer to transfer the subscription to.");
-      return;
-    }
+    setError("");
 
     if (!transferDate) {
       setError("Please choose the effective transfer date.");
       return;
     }
 
+    let payload = { transferDate };
+
+    if (mode === "existing") {
+      if (!newCustomerId) {
+        setError("Please select the customer to transfer the subscription to.");
+        return;
+      }
+      payload.newCustomerId = newCustomerId;
+    } else {
+      if (!newCustomerName.trim() || !newCustomerPhone.trim() || !newCustomerAddress.trim()) {
+        setError("Please fill out customer name, phone number, and delivery address.");
+        return;
+      }
+      payload.newCustomer = {
+        name: newCustomerName.trim(),
+        phone: newCustomerPhone.trim(),
+        address: newCustomerAddress.trim()
+      };
+    }
+
     setLoading(true);
-    setError("");
 
     try {
-      await subscriptionService.transferSubscription(subscription._id, {
-        newCustomerId,
-        transferDate
-      });
-      toast.success("Subscription transferred successfully! Future billing will now split accordingly.");
+      await subscriptionService.transferSubscription(subscription._id, payload);
+      toast.success(
+        mode === "new"
+          ? `Created customer "${newCustomerName.trim()}" and transferred subscription successfully!`
+          : "Subscription transferred successfully! Future billing will now split accordingly."
+      );
       onClose();
       if (onSuccess) onSuccess();
     } catch (err) {
@@ -134,15 +164,90 @@ const TransferModal = ({ isOpen, onClose, subscription, onSuccess }) => {
           </p>
         </div>
 
-        <Select
-          label="Transfer to Customer"
-          required
-          options={customerOptions}
-          value={newCustomerId}
-          onChange={(e) => setNewCustomerId(e.target.value)}
-          disabled={loadingCustomers || loading}
-          helperText="Select a registered customer in your account without an active subscription."
-        />
+        {/* Mode Selector Tabs */}
+        <div>
+          <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+            Transfer To
+          </label>
+          <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl border border-slate-200">
+            <button
+              type="button"
+              onClick={() => {
+                setMode("existing");
+                setError("");
+              }}
+              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                mode === "existing"
+                  ? "bg-white text-slate-900 shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Existing Customer
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode("new");
+                setError("");
+              }}
+              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                mode === "new"
+                  ? "bg-white text-slate-900 shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              + Create New Customer
+            </button>
+          </div>
+        </div>
+
+        {/* Existing Customer Dropdown */}
+        {mode === "existing" ? (
+          <Select
+            label="Select Existing Customer"
+            required
+            options={customerOptions}
+            value={newCustomerId}
+            onChange={(e) => setNewCustomerId(e.target.value)}
+            disabled={loadingCustomers || loading}
+            helperText="Choose a customer in your account without an active subscription."
+          />
+        ) : (
+          /* New Customer Creation Form */
+          <div className="space-y-3 p-3.5 bg-slate-50/80 rounded-xl border border-slate-200/70">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+              New Customer Information
+            </h4>
+            <Input
+              label="Customer Name"
+              type="text"
+              required
+              placeholder="e.g. Test Transfer Customer"
+              value={newCustomerName}
+              onChange={(e) => setNewCustomerName(e.target.value)}
+              prefixIcon={User}
+            />
+            <Input
+              label="Phone Number"
+              type="tel"
+              required
+              placeholder="e.g. 9876543222"
+              value={newCustomerPhone}
+              onChange={(e) => setNewCustomerPhone(e.target.value)}
+              prefixIcon={Phone}
+              helperText="Must be unique to your account."
+            />
+            <Input
+              label="Delivery Address"
+              type="text"
+              required
+              placeholder="e.g. Jaipur"
+              value={newCustomerAddress}
+              onChange={(e) => setNewCustomerAddress(e.target.value)}
+              prefixIcon={MapPin}
+            />
+          </div>
+        )}
 
         <Input
           label="Effective Transfer Date"
@@ -159,3 +264,4 @@ const TransferModal = ({ isOpen, onClose, subscription, onSuccess }) => {
 };
 
 export default TransferModal;
+

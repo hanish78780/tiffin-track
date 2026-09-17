@@ -6,7 +6,8 @@ const {
   getCustomers,
   getCustomerById,
   updateCustomer,
-  getCustomerByPhone
+  getCustomerByPhone,
+  deleteCustomer
 } = require("../controllers/customerController");
 const { importCustomers } = require("../controllers/customerImportController");
 
@@ -19,5 +20,7 @@ router.post("/", protect, createCustomer);
 router.get("/", protect, getCustomers);
 router.get("/:id", protect, getCustomerById);
 router.put("/:id", protect, updateCustomer);
+router.delete("/:id", protect, deleteCustomer);
+
 
 module.exports = router;

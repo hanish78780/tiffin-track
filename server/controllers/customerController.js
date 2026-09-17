@@ -1,5 +1,8 @@
 const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
+const Subscription = require("../models/Subscription");
+const SubscriptionAssignment = require("../models/SubscriptionAssignment");
+
 
 /**
  * POST /api/customers
@@ -196,10 +199,84 @@ const getCustomerByPhone = async (req, res, next) => {
   }
 };
 
+/**
+ * DELETE /api/customers/:id
+ * Safely delete a customer (owner-scoped).
+ * Rejects deletion if customer has an active subscription (HTTP 409).
+ * Preserves historical SubscriptionAssignment records for billing/audit integrity.
+ */
+const deleteCustomer = async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format"
+      });
+    }
+
+    const customer = await Customer.findOne({
+      _id: req.params.id,
+      ownerId: req.user.id
+    });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    // Check if customer has an active subscription as direct subscriber
+    const activeSub = await Subscription.findOne({
+      customerId: customer._id,
+      ownerId: req.user.id,
+      status: "active"
+    });
+
+    // Check if customer is currently assigned to an active subscription (via T6 transfer)
+    let assignedActiveSub = null;
+    const activeAssignment = await SubscriptionAssignment.findOne({
+      customerId: customer._id,
+      ownerId: req.user.id,
+      endDate: null
+    });
+
+    if (activeAssignment) {
+      assignedActiveSub = await Subscription.findOne({
+        _id: activeAssignment.subscriptionId,
+        ownerId: req.user.id,
+        status: "active"
+      });
+    }
+
+    if (activeSub || assignedActiveSub) {
+      return res.status(409).json({
+        success: false,
+        message: "Cannot delete customer with an active subscription. Please end or cancel the subscription first."
+      });
+    }
+
+    // Safely delete the customer record
+    await Customer.deleteOne({
+      _id: customer._id,
+      ownerId: req.user.id
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Customer deleted successfully"
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createCustomer,
   getCustomers,
   getCustomerById,
   updateCustomer,
-  getCustomerByPhone
+  getCustomerByPhone,
+  deleteCustomer
 };
+

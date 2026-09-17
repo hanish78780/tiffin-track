@@ -11,12 +11,15 @@ import {
   Edit2,
   PauseCircle,
   PlayCircle,
-  Clock
+  Clock,
+  Trash2
 } from "lucide-react";
+import { useToast } from "../context/ToastContext";
 import { customerService } from "../services/customerService";
 import { subscriptionService } from "../services/subscriptionService";
 import Card from "../components/common/Card";
 import Button from "../components/common/Button";
+import Modal from "../components/common/Modal";
 import StatusBadge from "../components/common/StatusBadge";
 import ErrorState from "../components/common/ErrorState";
 import { CardSkeleton } from "../components/common/LoadingSkeleton";
@@ -26,15 +29,22 @@ import ResumeModal from "../components/subscriptions/ResumeModal";
 const CustomerDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
 
   const [customer, setCustomer] = useState(null);
   const [subscription, setSubscription] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Delete modal state
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+
   // Modal states
   const [pauseModalOpen, setPauseModalOpen] = useState(false);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
+
 
   const fetchCustomerAndSubscription = useCallback(async () => {
     setLoading(true);
@@ -73,7 +83,28 @@ const CustomerDetailPage = () => {
     fetchCustomerAndSubscription();
   }, [fetchCustomerAndSubscription]);
 
+  const handleDeleteCustomer = async () => {
+    setDeleteLoading(true);
+    setDeleteError(null);
+
+    try {
+      await customerService.deleteCustomer(id);
+      toast.success(`Customer "${customer.name}" deleted successfully.`);
+      navigate("/customers");
+    } catch (err) {
+      const msg =
+        err.response?.data?.message ||
+        err.message ||
+        "Failed to delete customer.";
+      setDeleteError(msg);
+      toast.error(msg);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   if (loading) {
+
     return (
       <div className="max-w-3xl mx-auto space-y-6 animate-fade-in">
         <CardSkeleton lines={4} />
@@ -114,6 +145,18 @@ const CustomerDetailPage = () => {
         </Link>
 
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            icon={Trash2}
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+            onClick={() => {
+              setDeleteError(null);
+              setDeleteModalOpen(true);
+            }}
+          >
+            Delete
+          </Button>
           <Link to={`/customers/${customer._id}/edit`}>
             <Button variant="outline" size="sm" icon={Edit2}>
               Edit Customer
@@ -127,6 +170,7 @@ const CustomerDetailPage = () => {
             </Link>
           )}
         </div>
+
       </div>
 
       {/* Customer Profile Card */}
@@ -301,8 +345,60 @@ const CustomerDetailPage = () => {
           />
         </>
       )}
+
+      {/* Delete Customer Confirmation Modal */}
+      <Modal
+        isOpen={deleteModalOpen}
+        onClose={() => {
+          if (!deleteLoading) {
+            setDeleteModalOpen(false);
+          }
+        }}
+        title="Delete Customer"
+        subtitle={`Are you sure you want to delete ${customer.name}?`}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDeleteModalOpen(false)}
+              disabled={deleteLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleDeleteCustomer}
+              loading={deleteLoading}
+              loadingText="Deleting..."
+              icon={Trash2}
+            >
+              Delete Customer
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          {deleteError && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs font-medium text-red-700">
+              {deleteError}
+            </div>
+          )}
+          <p className="text-xs text-slate-600 leading-relaxed">
+            This action will permanently delete{" "}
+            <span className="font-semibold text-slate-900">{customer.name}</span>{" "}
+            ({customer.phone}).
+          </p>
+          <div className="p-3 bg-amber-50/80 border border-amber-200/70 rounded-xl text-xs text-amber-900 space-y-1">
+            <p className="font-semibold">Important:</p>
+            <p>Customers with an active subscription cannot be deleted. You must end or cancel their subscription first.</p>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 };
 
 export default CustomerDetailPage;
+
