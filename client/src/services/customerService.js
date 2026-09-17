@@ -29,7 +29,13 @@ export const customerService = {
   async importCustomers(csvText) {
     const response = await api.post("/customers/import", { csv: csvText });
     return response.data;
+  },
+
+  async deleteCustomer(id) {
+    const response = await api.delete(`/customers/${id}`);
+    return response.data;
   }
 };
+
 
 export default customerService;

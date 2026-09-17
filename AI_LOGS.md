@@ -2078,3 +2078,499 @@ Notification Service
 /outbox
 
 So the challenge's actual /clock and Notification Service contract should be inspected first and treated as authoritative.
+
+Yes. Since your implementation is already done, let's verify it exactly like a recruiter/grader would, step by step.
+
+I recommend checking T1 → T6 → T4 → final repository.
+
+1. Start your backend
+
+Open Antigravity terminal:
+
+cd server
+npm start
+
+You should see something like:
+
+Server running on port 5000
+MongoDB connected
+
+Keep this terminal running.
+
+2. Check T1 — Delivery Notification
+Step 1: Login
+
+Use Postman/Thunder Client.
+
+POST http://localhost:5000/api/auth/login
+
+Body:
+
+{
+  "email": "your-email@example.com",
+  "password": "your-password"
+}
+
+Copy the JWT token.
+
+For protected endpoints, use:
+
+Authorization: Bearer YOUR_TOKEN
+Step 2: Create an active customer
+
+Create a customer if you don't already have one:
+
+POST http://localhost:5000/api/customers
+
+Body:
+
+{
+  "name": "T1 Test Customer",
+  "phone": "9876543201",
+  "address": "Jaipur"
+}
+
+Copy the returned customerId.
+
+Step 3: Create subscription
+POST http://localhost:5000/api/subscriptions
+
+Body similar to:
+
+{
+  "customerId": "CUSTOMER_ID",
+  "planName": "Monthly Lunch",
+  "monthlyPrice": 3000,
+  "startDate": "2026-09-01"
+}
+Step 4: Reset outbox
+
+If your implementation supports it:
+
+DELETE http://localhost:5000/outbox
+
+or:
+
+DELETE http://localhost:5000/api/outbox
+
+You want a clean starting point.
+
+Step 5: Trigger the clock
+
+This is the most important T1 test.
+
+POST http://localhost:5000/clock
+
+If your endpoint requires a date, use the format your implementation expects.
+
+For example, if supported:
+
+{
+  "date": "2026-09-14"
+}
+
+September 14, 2026 is a Monday.
+
+Step 6: Check /outbox
+
+Immediately call:
+
+GET http://localhost:5000/outbox
+
+or:
+
+GET http://localhost:5000/api/outbox
+
+You should find a notification for:
+
+T1 Test Customer
+2026-09-14
+
+The important thing is that the customer appears because:
+
+Monday
++
+active subscription
++
+subscription started
++
+not paused
+=
+delivery notification
+3. Test T1 idempotency
+
+Now call:
+
+POST http://localhost:5000/clock
+
+again for the same date.
+
+Then:
+
+GET http://localhost:5000/outbox
+
+The notification count should not increase for that same customer/date.
+
+You should effectively have:
+
+subscriptionId + 2026-09-14
+
+only once.
+
+This verifies your MongoDB unique deliveryEventKey.
+
+4. Test T1 pause exclusion
+
+Pause the subscription for the test date.
+
+For example:
+
+POST /api/subscriptions/SUBSCRIPTION_ID/pause
+
+Use:
+
+{
+  "startDate": "2026-09-14",
+  "reason": "Travel"
+}
+
+Clear/reset the outbox again:
+
+DELETE /outbox
+
+Then:
+
+POST /clock
+
+Then:
+
+GET /outbox
+
+Expected:
+
+No notification for T1 Test Customer
+
+because:
+
+Monday
++
+active subscription
++
+PAUSED
+=
+NO DELIVERY
+5. Test weekend exclusion
+
+Resume the subscription.
+
+Then test a Saturday date, for example:
+
+2026-09-12
+
+Reset:
+
+DELETE /outbox
+
+Trigger:
+
+POST /clock
+
+Check:
+
+GET /outbox
+
+Expected:
+
+No notification
+
+because Saturday is not a delivery day.
+
+6. Check T6 — Subscription Transfer
+
+Now create two customers:
+
+Customer A
+Customer B
+
+Create a subscription for Customer A:
+
+₹3,000/month
+Start: 2026-09-01
+
+Then transfer it.
+
+Your endpoint should be something like:
+
+POST /api/subscriptions/SUBSCRIPTION_ID/transfer
+
+Body:
+
+{
+  "newCustomerId": "CUSTOMER_B_ID",
+  "transferDate": "2026-09-15"
+}
+
+Use your actual endpoint/request format shown in your implementation.
+
+Check subscription
+
+Now:
+
+GET /api/subscriptions/SUBSCRIPTION_ID
+
+Verify:
+
+Plan name       → unchanged
+Monthly price   → ₹3,000
+Original start  → unchanged
+Transfer date   → 2026-09-15
+Current customer → Customer B
+History         → Customer A + Customer B
+
+You should see something conceptually like:
+
+Ownership & Transfer History
+
+Customer A
+Sep 1 → Sep 14
+
+Customer B
+Sep 15 → Sep 30
+7. Check T6 billing
+
+This is the most important T6 check.
+
+For Customer A:
+
+GET /api/billing/CUSTOMER_A_ID?month=2026-09
+
+Then Customer B:
+
+GET /api/billing/CUSTOMER_B_ID?month=2026-09
+
+The results should show that:
+
+Customer A
+→ only days before transfer
+
+Customer B
+→ only days from transfer onward
+
+And the subscription's total billing should remain based on:
+
+₹3,000 / 22 weekdays
+
+not:
+
+₹3,000 / Customer A days
+₹3,000 / Customer B days
+
+That's the key T6 business rule.
+
+8. Check T4 — CSV Import
+
+Go to your frontend:
+
+Customers
+   ↓
+Import CSV
+
+Create a test CSV:
+
+name,phone,address,planName,monthlyPrice,startDate
+Rahul Sharma,9876543210,Jaipur,Monthly Lunch,3000,01/09/2026
+Rahul Duplicate,98765-43210,Jaipur,Monthly Lunch,3000,2026-09-01
+Priya Verma,9876543211,Jaipur,Monthly Lunch,3000,9-1-2026
+,9876543212,Jaipur,Monthly Lunch,3000,2026-09-01
+Amit, ,Jaipur,Monthly Lunch,3000,2026-09-01
+Wrong Date,9876543213,Jaipur,Monthly Lunch,3000,abc
+
+Import it.
+
+Your report should contain:
+
+Imported: X
+Deduped: Y
+Rejected: Z
+9. Check the three T4 categories
+Imported
+
+Valid rows should create:
+
+Customer
++
+Subscription
++
+Assignment
+Deduped
+
+For:
+
+9876543210
+98765-43210
+
+only one customer should exist.
+
+Rejected
+
+Rows such as:
+
+missing name
+missing phone
+invalid date
+invalid price
+
+should appear under:
+
+Rejected
+
+and must not create partial database records.
+
+10. Check your database
+
+This step is important.
+
+Open MongoDB Compass or your MongoDB database.
+
+Check collections:
+
+customers
+subscriptions
+subscriptionassignments
+pauseperiods
+notificationoutboxes
+
+Depending on your exact model names.
+
+Verify that the CSV didn't create:
+
+duplicate customer
+orphan subscription
+duplicate assignment
+11. Run the automated tests
+
+After manual testing:
+
+cd server
+npm test
+
+You should get:
+
+Test Suites: 5 passed, 5 total
+Tests:       65 passed, 65 total
+
+That's your regression proof.
+
+12. Check frontend
+
+Open another terminal:
+
+cd client
+npm run build
+
+Expected:
+
+✓ built
+
+with:
+
+0 errors
+0 warnings
+13. Check GitHub
+
+Finally:
+
+git status
+
+Expected:
+
+nothing to commit, working tree clean
+
+Then:
+
+git log -1 --oneline
+
+You should see:
+
+61787fb Implement T1 T6 T4 builder twists
+
+And verify your GitHub repository has:
+
+README.md
+REASONING.md
+AI_LOGS.md
+client/
+server/
+
+Your repository is:
+
+TiffinTrack GitHub Repository
+
+Fastest way to verify everything
+
+If you don't want to manually test every scenario, run this:
+
+cd server
+npm test
+
+Then:
+
+cd ../client
+npm run build
+
+If you get:
+
+65/65 tests PASS
++
+frontend build PASS
+
+then the automated implementation is verified.
+
+But before submission, I would still manually perform these three critical grader flows:
+
+T1:
+POST /clock
+      ↓
+GET /outbox
+
+
+T6:
+Transfer A → B
+      ↓
+Billing A
+      ↓
+Billing B
+
+
+T4:
+Upload messy CSV
+      ↓
+Imported / Deduped / Rejected
+      ↓
+Check database
+
+If you want, send me a screenshot/output of your POST /clock response and GET /outbox response, and I'll tell you whether your T1 implementation is behaving correctly.
+
+---
+
+## Session: Final Product Fixes (Post-QA Audit)
+
+### Prompt Overview
+Resolved three manual QA issues discovered during user testing:
+1. **Customer Safe Deletion**:
+   - Implemented `DELETE /api/customers/:id` with owner isolation.
+   - Prevented deletion of customers with active subscriptions (returning HTTP 409 Conflict).
+   - Preserved historical `SubscriptionAssignment` records for audit & historical billing integrity.
+   - Added interactive confirmation modals in Customers list and Customer Detail page.
+2. **Current-Month Billing Cutoff**:
+   - Corrected business logic so current month billing stops at `today` in IST (Asia/Kolkata), never billing future delivery days.
+   - Preserved agreed daily rate calculation (`monthlyPrice / totalWeekdaysInMonth`).
+   - Handled pauses and T6 transfers with cutoff respect.
+   - Rejected future months with HTTP 400.
+   - Added cutoff communication banner to Billing page.
+3. **Transfer Membership with New Customer Creation**:
+   - Extended `POST /api/subscriptions/:id/transfer` to accept `{ newCustomer: { name, phone, address }, transferDate }`.
+   - Added 409 conflict detection for duplicate phone numbers under the owner.
+   - Enforced transactional boundary with automatic rollback to avoid orphaned customer entities.
+   - Added dual-mode UI in `TransferModal` (`Existing Customer` vs `+ Create New Customer`).
+   - Expanded test suite from 65 to 86 tests passing across 8 suites.

@@ -37,13 +37,47 @@ const BillingCard = ({ billData, customerId, onOpenCreateSub }) => {
 
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-xs border border-white/20 text-xs font-semibold text-white">
             <Calendar className="w-3.5 h-3.5" />
-            <span>{formatMonthName(billing.month)}</span>
+            <span>
+              {billing.isCurrentMonth
+                ? `${formatMonthName(billing.month)} (Through Today)`
+                : `${formatMonthName(billing.month)} (Full Month)`}
+            </span>
           </div>
         </div>
       </div>
 
       {/* Main Billing Table & Metrics */}
       <div className="p-6 space-y-6">
+        {/* Current Month Cutoff vs Full Month Banner */}
+        {billing.isCurrentMonth ? (
+          <div className="flex items-center gap-3 p-3.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 font-medium">
+            <Calendar className="w-4 h-4 text-blue-600 flex-shrink-0" />
+            <div>
+              <p className="font-semibold text-blue-950">
+                Current month billing through{" "}
+                {billing.cutoffDate
+                  ? new Date(billing.cutoffDate + "T00:00:00Z").toLocaleDateString("en-IN", {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                      timeZone: "UTC"
+                    })
+                  : "today"}
+              </p>
+              <p className="text-blue-800 text-[11px] mt-0.5">
+                Billing calculated through today. Future delivery days are not included.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-medium">
+            <Calendar className="w-4 h-4 text-slate-500 flex-shrink-0" />
+            <span>
+              {formatMonthName(billing.month)} — Full month billing
+            </span>
+          </div>
+        )}
+
         {/* Status Callout */}
         {isEntireMonthPaused && (
           <div className="flex items-center gap-3 p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 font-medium">
@@ -52,12 +86,13 @@ const BillingCard = ({ billData, customerId, onOpenCreateSub }) => {
           </div>
         )}
 
-        {isFullMonthServed && (
+        {isFullMonthServed && !billing.isCurrentMonth && (
           <div className="flex items-center gap-3 p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-medium">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
             <span>Full month served — no pause periods recorded.</span>
           </div>
         )}
+
 
         {/* Breakdown Key Metrics Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

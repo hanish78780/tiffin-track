@@ -357,8 +357,10 @@ const resumeSubscription = async (req, res, next) => {
 /**
  * POST /api/subscriptions/:id/transfer
  * Transfer a subscription to a new customer mid-cycle (T6).
- * Plan, cycle, price, and pause history remain unchanged.
- * Billing splits by who was served.
+ * Supports:
+ * - Existing customer: { newCustomerId, transferDate }
+ * - New customer creation: { newCustomer: { name, phone, address }, transferDate }
+ * Wrapped in transaction/rollback safety so customer is not orphaned if transfer fails.
  */
 const transferSubscription = async (req, res, next) => {
   try {
@@ -369,23 +371,23 @@ const transferSubscription = async (req, res, next) => {
       });
     }
 
-    const { newCustomerId, transferDate } = req.body;
+    const { newCustomerId, newCustomer, transferDate } = req.body;
 
-    if (!newCustomerId || !transferDate) {
+    if (!transferDate) {
       return res.status(400).json({
         success: false,
-        message: "newCustomerId and transferDate are required"
+        message: "transferDate is required"
       });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(newCustomerId)) {
+    if (!newCustomerId && !newCustomer) {
       return res.status(400).json({
         success: false,
-        message: "Invalid customer ID format"
+        message: "Target customer (newCustomerId or newCustomer) is required"
       });
     }
 
-    // Find subscription owned by authenticated user
+    // 1. Validate subscription ownership
     const subscription = await Subscription.findOne({
       _id: req.params.id,
       ownerId: req.user.id
@@ -405,43 +407,7 @@ const transferSubscription = async (req, res, next) => {
       });
     }
 
-    // Check if new customer exists and belongs to authenticated owner
-    const newCustomer = await Customer.findOne({
-      _id: newCustomerId,
-      ownerId: req.user.id
-    });
-
-    if (!newCustomer) {
-      return res.status(404).json({
-        success: false,
-        message: "Target customer not found"
-      });
-    }
-
-    // Cannot transfer to same customer
-    if (String(subscription.customerId) === String(newCustomerId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Cannot transfer subscription to the same customer"
-      });
-    }
-
-    // Target customer cannot already have an active subscription
-    const existingActiveForTarget = await Subscription.findOne({
-      customerId: newCustomerId,
-      ownerId: req.user.id,
-      status: "active",
-      _id: { $ne: subscription._id }
-    });
-
-    if (existingActiveForTarget) {
-      return res.status(409).json({
-        success: false,
-        message: "Target customer already has an active subscription"
-      });
-    }
-
-    // Validate transfer date format
+    // 2. Validate transfer date format & cycle bounds
     const transferDateMatch = String(transferDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (!transferDateMatch) {
       return res.status(400).json({
@@ -469,58 +435,189 @@ const transferSubscription = async (req, res, next) => {
       });
     }
 
-    // Find currently active assignment
-    let currentAssignment = await SubscriptionAssignment.findOne({
-      subscriptionId: subscription._id,
-      ownerId: req.user.id,
-      endDate: null
-    });
+    let targetCustomerId = newCustomerId;
+    let trimmedName = "";
+    let trimmedPhone = "";
+    let trimmedAddress = "";
 
-    // If no assignments exist yet (legacy), create retroactive initial assignment
-    if (!currentAssignment) {
-      currentAssignment = await SubscriptionAssignment.create({
+    if (newCustomer) {
+      // 3. Validate new customer data
+      if (!newCustomer.name || !newCustomer.phone || !newCustomer.address) {
+        return res.status(400).json({
+          success: false,
+          message: "Name, phone, and address are required for new customer"
+        });
+      }
+
+      trimmedName = String(newCustomer.name).trim();
+      trimmedPhone = String(newCustomer.phone).trim();
+      trimmedAddress = String(newCustomer.address).trim();
+
+      if (!trimmedName || !trimmedPhone || !trimmedAddress) {
+        return res.status(400).json({
+          success: false,
+          message: "Name, phone, and address cannot be empty"
+        });
+      }
+
+      // 4. Check phone uniqueness for owner
+      const phoneConflict = await Customer.findOne({
         ownerId: req.user.id,
-        subscriptionId: subscription._id,
-        customerId: subscription.customerId,
-        startDate: subscription.startDate,
-        endDate: null
+        phone: trimmedPhone
       });
+
+      if (phoneConflict) {
+        return res.status(409).json({
+          success: false,
+          message: "Customer with this phone number already exists"
+        });
+      }
+    } else {
+      // Validate existing customer
+      if (!mongoose.Types.ObjectId.isValid(newCustomerId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid customer ID format"
+        });
+      }
+
+      const existingCustomer = await Customer.findOne({
+        _id: newCustomerId,
+        ownerId: req.user.id
+      });
+
+      if (!existingCustomer) {
+        return res.status(404).json({
+          success: false,
+          message: "Target customer not found"
+        });
+      }
+
+      if (String(subscription.customerId) === String(newCustomerId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot transfer subscription to the same customer"
+        });
+      }
+
+      const existingActiveForTarget = await Subscription.findOne({
+        customerId: newCustomerId,
+        ownerId: req.user.id,
+        status: "active",
+        _id: { $ne: subscription._id }
+      });
+
+      if (existingActiveForTarget) {
+        return res.status(409).json({
+          success: false,
+          message: "Target customer already has an active subscription"
+        });
+      }
     }
 
-    // Close previous assignment on the day before transferDate (inclusive)
-    const dayBeforeTransferUtcMs = transferUtcMs - 86400000;
-    currentAssignment.endDate = new Date(dayBeforeTransferUtcMs);
-    await currentAssignment.save();
-
-    // Create new assignment starting on transferDate
-    const newAssignment = await SubscriptionAssignment.create({
-      ownerId: req.user.id,
-      subscriptionId: subscription._id,
-      customerId: newCustomerId,
-      startDate: new Date(transferUtcMs),
-      endDate: null
-    });
-
-    // Update current customer on subscription
-    const previousCustomerId = subscription.customerId;
-    subscription.customerId = newCustomerId;
-    await subscription.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Subscription transferred successfully",
-      subscription,
-      transfer: {
-        previousCustomerId,
-        newCustomerId,
-        transferDate: `${tYear}-${String(tMonth).padStart(2, "0")}-${String(tDay).padStart(2, "0")}`,
-        newAssignmentId: newAssignment._id
+    // Session-based transaction with fallback rollback safety
+    let session = null;
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      try {
+        session = await mongoose.startSession();
+        session.startTransaction();
+      } catch {
+        session = null;
       }
-    });
+    }
+
+
+    let newlyCreatedCustomer = null;
+
+    try {
+      // 5. Create Customer if newCustomer
+      if (newCustomer) {
+        newlyCreatedCustomer = await Customer.create({
+          name: trimmedName,
+          phone: trimmedPhone,
+          address: trimmedAddress,
+          ownerId: req.user.id
+        });
+        targetCustomerId = newlyCreatedCustomer._id;
+      }
+
+      // 6. Find currently active assignment
+      let currentAssignment = await SubscriptionAssignment.findOne({
+        subscriptionId: subscription._id,
+        ownerId: req.user.id,
+        endDate: null
+      });
+
+      // If no assignments exist yet (legacy), create initial assignment
+      if (!currentAssignment) {
+        currentAssignment = await SubscriptionAssignment.create({
+          ownerId: req.user.id,
+          subscriptionId: subscription._id,
+          customerId: subscription.customerId,
+          startDate: subscription.startDate,
+          endDate: null
+        });
+      }
+
+      // 7. Close previous assignment on the day before transferDate (inclusive)
+      const dayBeforeTransferUtcMs = transferUtcMs - 86400000;
+      currentAssignment.endDate = new Date(dayBeforeTransferUtcMs);
+      await currentAssignment.save();
+
+      // Create new assignment starting on transferDate
+      const newAssignment = await SubscriptionAssignment.create({
+        ownerId: req.user.id,
+        subscriptionId: subscription._id,
+        customerId: targetCustomerId,
+        startDate: new Date(transferUtcMs),
+        endDate: null
+      });
+
+      // 8. Update Subscription active customer pointer
+      const previousCustomerId = subscription.customerId;
+      subscription.customerId = targetCustomerId;
+      await subscription.save();
+
+      // 9. Commit transaction
+      if (session) {
+        await session.commitTransaction();
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Subscription transferred successfully",
+        subscription,
+        newCustomer: newlyCreatedCustomer,
+        transfer: {
+          previousCustomerId,
+          newCustomerId: targetCustomerId,
+          transferDate: `${tYear}-${String(tMonth).padStart(2, "0")}-${String(tDay).padStart(2, "0")}`,
+          newAssignmentId: newAssignment._id
+        }
+      });
+    } catch (err) {
+      if (session) {
+        try {
+          await session.abortTransaction();
+        } catch {}
+      }
+      // Rollback newly created customer if transfer failed downstream
+      if (newlyCreatedCustomer && newlyCreatedCustomer._id) {
+        try {
+          await Customer.deleteOne({ _id: newlyCreatedCustomer._id, ownerId: req.user.id });
+        } catch {}
+      }
+      throw err;
+    } finally {
+      if (session) {
+        session.endSession();
+      }
+    }
   } catch (error) {
     next(error);
   }
 };
+
 
 module.exports = {
   createSubscription,

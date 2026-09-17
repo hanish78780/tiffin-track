@@ -8,8 +8,10 @@ import {
   MapPin,
   ExternalLink,
   Edit2,
-  UploadCloud
+  UploadCloud,
+  Trash2
 } from "lucide-react";
+import { useToast } from "../context/ToastContext";
 import { customerService } from "../services/customerService";
 import { subscriptionService } from "../services/subscriptionService";
 import Modal from "../components/common/Modal";
@@ -22,6 +24,7 @@ import EmptyState from "../components/common/EmptyState";
 import ErrorState from "../components/common/ErrorState";
 import { TableSkeleton } from "../components/common/LoadingSkeleton";
 import CustomerImportModal from "../components/customers/CustomerImportModal";
+
 
 const CustomersPage = () => {
   const [customers, setCustomers] = useState([]);
@@ -36,12 +39,20 @@ const CustomersPage = () => {
 
   const [importModalOpen, setImportModalOpen] = useState(false);
 
+  // Delete customer modal state
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [customerToDelete, setCustomerToDelete] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+  const toast = useToast();
+
   // Dedicated phone lookup state (GET /api/customers/phone/:phone)
   const [phoneModalOpen, setPhoneModalOpen] = useState(false);
   const [lookupPhone, setLookupPhone] = useState("");
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupResult, setLookupResult] = useState(null);
   const [lookupError, setLookupError] = useState(null);
+
 
   // Debounce search input by 300ms
   useEffect(() => {
@@ -125,7 +136,31 @@ const CustomersPage = () => {
     }
   };
 
+  const handleDeleteCustomer = async () => {
+    if (!customerToDelete) return;
+    setDeleteLoading(true);
+    setDeleteError(null);
+
+    try {
+      await customerService.deleteCustomer(customerToDelete._id);
+      toast.success(`Customer "${customerToDelete.name}" deleted successfully.`);
+      setDeleteModalOpen(false);
+      setCustomerToDelete(null);
+      fetchCustomers(pagination.page);
+    } catch (err) {
+      const msg =
+        err.response?.data?.message ||
+        err.message ||
+        "Failed to delete customer.";
+      setDeleteError(msg);
+      toast.error(msg);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   return (
+
     <div className="space-y-6 animate-fade-in">
       {/* Header & Action */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -312,6 +347,18 @@ const CustomersPage = () => {
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </Link>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCustomerToDelete(cust);
+                                  setDeleteError(null);
+                                  setDeleteModalOpen(true);
+                                }}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                                title="Delete Customer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                               <Link
                                 to={`/customers/${cust._id}`}
                                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-emerald-50 text-xs font-semibold text-slate-700 hover:text-emerald-800 transition-colors border border-slate-200"
@@ -319,6 +366,7 @@ const CustomersPage = () => {
                                 <span>Details</span>
                                 <ExternalLink className="w-3 h-3" />
                               </Link>
+
                             </div>
                           </td>
                         </tr>
@@ -422,8 +470,64 @@ const CustomersPage = () => {
         onClose={() => setImportModalOpen(false)}
         onSuccess={() => fetchCustomers(1)}
       />
+
+      {/* Delete Customer Confirmation Modal */}
+      <Modal
+        isOpen={deleteModalOpen}
+        onClose={() => {
+          if (!deleteLoading) {
+            setDeleteModalOpen(false);
+            setCustomerToDelete(null);
+          }
+        }}
+        title="Delete Customer"
+        subtitle={customerToDelete ? `Are you sure you want to delete ${customerToDelete.name}?` : "Delete Customer"}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setDeleteModalOpen(false);
+                setCustomerToDelete(null);
+              }}
+              disabled={deleteLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleDeleteCustomer}
+              loading={deleteLoading}
+              loadingText="Deleting..."
+              icon={Trash2}
+            >
+              Delete Customer
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          {deleteError && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs font-medium text-red-700">
+              {deleteError}
+            </div>
+          )}
+          <p className="text-xs text-slate-600 leading-relaxed">
+            This action will permanently delete{" "}
+            <span className="font-semibold text-slate-900">{customerToDelete?.name}</span>{" "}
+            ({customerToDelete?.phone}).
+          </p>
+          <div className="p-3 bg-amber-50/80 border border-amber-200/70 rounded-xl text-xs text-amber-900 space-y-1">
+            <p className="font-semibold">Important:</p>
+            <p>Customers with an active subscription cannot be deleted. You must end or cancel their subscription first.</p>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 };
 
 export default CustomersPage;
+

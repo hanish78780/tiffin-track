@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const Customer = require("../models/Customer");
 const Subscription = require("../models/Subscription");
 const PausePeriod = require("../models/PausePeriod");
-const { calculateBill } = require("../utils/billing");
+const { calculateBill, getTodayIST } = require("../utils/billing");
 
 const SubscriptionAssignment = require("../models/SubscriptionAssignment");
 
@@ -12,6 +12,11 @@ const SubscriptionAssignment = require("../models/SubscriptionAssignment");
  * All ownership checks enforce that the customer, subscription,
  * and pause periods belong to the authenticated owner.
  * Supports split billing for transferred subscriptions (T6).
+ *
+ * Current-Month Cutoff Rule:
+ * - Current month: bill only through today (never includes future delivery days).
+ * - Past month: entire month calculated.
+ * - Future month: returns HTTP 400.
  */
 const getBill = async (req, res, next) => {
   try {
@@ -33,6 +38,19 @@ const getBill = async (req, res, next) => {
         message: "Month is required in YYYY-MM format (e.g. 2026-09)"
       });
     }
+
+    // Determine cutoff date in IST (Asia/Kolkata)
+    const asOfDate = req.query.asOfDate || req.query.today || getTodayIST();
+    const asOfMonthStr = asOfDate.slice(0, 7);
+
+    // Case 3 — Future month rejection
+    if (month > asOfMonthStr) {
+      return res.status(400).json({
+        success: false,
+        message: "Billing is not available for future months"
+      });
+    }
+
 
     const [yearStr, monthStr] = month.split("-");
     const year = parseInt(yearStr, 10);
@@ -105,7 +123,8 @@ const getBill = async (req, res, next) => {
       month: monthNum,
       pausePeriods,
       assignments,
-      defaultCustomer: { id: customer._id, name: customer.name }
+      defaultCustomer: { id: customer._id, name: customer.name },
+      asOfDate
     });
 
     // Determine if this is a split subscription and find this customer's portion
@@ -132,14 +151,18 @@ const getBill = async (req, res, next) => {
         month,
         monthlyPrice: billing.monthlyPrice,
         totalWeekdays: billing.totalWeekdays,
+        weekdaysElapsed: billing.weekdaysElapsed,
         pausedDays: billing.pausedDays,
         servedDays: customerServedDays,
         dailyRate: billing.dailyRate,
         totalBill: customerBill,
         planTotalBill: billing.totalBill,
         planTotalServedDays: billing.servedDays,
-        customerBreakdown: billing.customerBreakdown || []
+        customerBreakdown: billing.customerBreakdown || [],
+        cutoffDate: billing.cutoffDate,
+        isCurrentMonth: billing.isCurrentMonth
       },
+
       pausePeriods: pausePeriods.map((p) => ({
         startDate: p.startDate,
         endDate: p.endDate,
