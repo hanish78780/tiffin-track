@@ -226,9 +226,9 @@ totalBill      = round(dailyRate * servedDays, 2)
 - Monthly Price: ₹3,000
 - Month: September 2026 (22 weekdays)
 - Pause Period: Sep 10 to Sep 15 (inclusive: Thu 10, Fri 11, Mon 14, Tue 15 = 4 weekdays)
-- Daily Rate = 3,000 ÷ 22 = ₹136.36 / day
-- Served Days = 22 - 4 = 18 weekdays
-- Final Bill = ₹136.36 × 18 = **₹2,454.55**
+- Exact Daily Rate = ₹3,000 ÷ 22 = ₹136.363636...
+- Served Days = 18
+- Final Bill = 18 × (₹3,000 ÷ 22) = ₹2,454.55
 
 ---
 
